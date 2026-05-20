@@ -66,8 +66,8 @@ async function handleApiTrace(req, res) {
     return;
   }
 
-  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
-    sendJson(res, 400, { error: "Limit must be an integer from 1 to 50." });
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    sendJson(res, 400, { error: "Limit must be an integer from 1 to 100." });
     return;
   }
 

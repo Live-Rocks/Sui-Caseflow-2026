@@ -25,6 +25,7 @@
             <select id="limitSelect">
               <option value="25" selected>Last 25</option>
               <option value="50">Last 50</option>
+              <option value="100">Last 100</option>
             </select>
           </div>
           <div class="input-actions">
@@ -62,10 +63,11 @@
             <h2 id="caseTitle">Loading trace</h2>
           </div>
           <div class="toolbar-actions">
-            <button id="undoButton" class="icon-button" title="Undo last action" aria-label="Undo last action" disabled>↶</button>
+            <button id="undoButton" class="icon-button" title="Undo last action" aria-label="Undo last action" disabled><span class="undo-icon" aria-hidden="true">↶</span></button>
             <button id="showAllButton" class="icon-button" title="Show hidden items" aria-label="Show hidden items">◉</button>
             <button id="fitButton" class="icon-button" title="Fit graph" aria-label="Fit graph">⌖</button>
-            <button id="exportButton" class="icon-button" title="Export summary" aria-label="Export summary">⇩</button>
+            <button id="dustFilterButton" class="secondary-button" title="Hide same-tx and tiny SUI noise">Hide dust</button>
+            <button id="mintSnapshotButton" class="secondary-button">Case Snapshot</button>
           </div>
         </header>
 
@@ -93,6 +95,37 @@
         </section>
       </aside>
     </div>
+
+    <dialog id="mintDialog" class="mint-dialog">
+      <form method="dialog" class="mint-card">
+        <button id="closeMintButton" class="close-button" title="Close mint preview" aria-label="Close mint preview">×</button>
+        <p class="eyebrow">Case snapshot</p>
+        <h2>Case Snapshot</h2>
+        <div class="mint-preview-frame">
+          <img id="snapshotPreview" alt="Snapshot preview">
+        </div>
+        <dl class="mint-meta">
+          <div>
+            <dt>Seed</dt>
+            <dd id="snapshotSeed"></dd>
+          </div>
+          <div>
+            <dt>Visible graph</dt>
+            <dd id="snapshotStats"></dd>
+          </div>
+          <div>
+            <dt>Snapshot hash</dt>
+            <dd id="snapshotHash"></dd>
+          </div>
+        </dl>
+        <p id="mintStatus" class="mint-status"></p>
+        <div class="mint-actions">
+          <button id="downloadReportButton" type="button" class="secondary-button">Download Report</button>
+          <button id="downloadSnapshotButton" type="button" class="secondary-button">Download JSON</button>
+          <button id="confirmMintButton" type="button" class="primary-button">Mint on Sui testnet</button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="./app.js"></script>
   </body>

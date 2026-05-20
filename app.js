@@ -2,6 +2,8 @@ const SAMPLE_ADDRESS = "0x27bc7a3c4f406cfa91551c32490ad7f5029414578c0649ab4ddbd2
 const EXPLORER_BASE_URL = "https://suivision.xyz";
 const LABELS = ["hacker", "intermediate", "bridge", "exchange_suspect", "known_entity", "watch"];
 const MAX_UNDO_STEPS = 20;
+const SUI_COIN_TYPE = "0x2::sui::SUI";
+const DUST_SUI_THRESHOLD = 5_000_000n;
 
 let trace = null;
 let selectedNodeId = SAMPLE_ADDRESS;
@@ -9,6 +11,8 @@ let selectedFlowKey = null;
 let dragState = null;
 let panState = null;
 let viewportState = null;
+let pendingSnapshot = null;
+let dustFilterEnabled = false;
 const manualPositions = new Map();
 let currentPositions = new Map();
 const labelState = new Map();
@@ -27,8 +31,9 @@ const els = {
   historyHint: document.querySelector("#historyHint"),
   undoButton: document.querySelector("#undoButton"),
   showAllButton: document.querySelector("#showAllButton"),
+  dustFilterButton: document.querySelector("#dustFilterButton"),
   fitButton: document.querySelector("#fitButton"),
-  exportButton: document.querySelector("#exportButton"),
+  mintSnapshotButton: document.querySelector("#mintSnapshotButton"),
   nodeCount: document.querySelector("#nodeCount"),
   edgeCount: document.querySelector("#edgeCount"),
   txCount: document.querySelector("#txCount"),
@@ -44,6 +49,16 @@ const els = {
   flowSummary: document.querySelector("#flowSummary"),
   flowList: document.querySelector("#flowList"),
   hideFlowButton: document.querySelector("#hideFlowButton"),
+  mintDialog: document.querySelector("#mintDialog"),
+  closeMintButton: document.querySelector("#closeMintButton"),
+  snapshotPreview: document.querySelector("#snapshotPreview"),
+  snapshotSeed: document.querySelector("#snapshotSeed"),
+  snapshotStats: document.querySelector("#snapshotStats"),
+  snapshotHash: document.querySelector("#snapshotHash"),
+  mintStatus: document.querySelector("#mintStatus"),
+  downloadReportButton: document.querySelector("#downloadReportButton"),
+  downloadSnapshotButton: document.querySelector("#downloadSnapshotButton"),
+  confirmMintButton: document.querySelector("#confirmMintButton"),
 };
 
 function shortAddress(address) {
@@ -58,6 +73,10 @@ function txUrl(txDigest) {
 
 function accountUrl(address) {
   return `${EXPLORER_BASE_URL}/account/${encodeURIComponent(address)}`;
+}
+
+function testnetObjectUrl(objectId) {
+  return `${EXPLORER_BASE_URL}/object/${encodeURIComponent(objectId)}?network=testnet`;
 }
 
 function isSuiAddress(address) {
@@ -120,6 +139,24 @@ function edgeSymbol(edge) {
 
 function sameTransactionOnly(edge) {
   return edge.confidence === "possible" && edge.amount === "0";
+}
+
+function isSuiEdge(edge) {
+  return edge.coinType === SUI_COIN_TYPE || edgeSymbol(edge).toUpperCase() === "SUI";
+}
+
+function isDustEdge(edge) {
+  if (sameTransactionOnly(edge)) return true;
+  if (edge.amount === "0") return true;
+  if (!isSuiEdge(edge)) return false;
+
+  try {
+    const amount = BigInt(edge.amount);
+    const abs = amount < 0n ? -amount : amount;
+    return abs < DUST_SUI_THRESHOLD;
+  } catch {
+    return false;
+  }
 }
 
 function assetKey(edge) {
@@ -298,6 +335,7 @@ function visibleEdges(graph) {
   return graph.edges.filter((edge) => {
     if (hiddenEdgeIds.has(edgeId(edge))) return false;
     if (hiddenNodeIds.has(edge.from) || hiddenNodeIds.has(edge.to)) return false;
+    if (dustFilterEnabled && isDustEdge(edge)) return false;
     return true;
   });
 }
@@ -344,6 +382,7 @@ function captureState() {
     selectedNodeId,
     selectedFlowKey,
     viewportState: cloneValue(viewportState),
+    dustFilterEnabled,
     manualPositions: mapToEntries(manualPositions),
     labelState: mapToEntries(labelState),
     hiddenNodeIds: Array.from(hiddenNodeIds),
@@ -359,6 +398,7 @@ function restoreState(snapshot) {
   selectedNodeId = snapshot.selectedNodeId;
   selectedFlowKey = snapshot.selectedFlowKey;
   viewportState = cloneValue(snapshot.viewportState);
+  dustFilterEnabled = Boolean(snapshot.dustFilterEnabled);
 
   restoreMap(manualPositions, snapshot.manualPositions);
   restoreMap(labelState, snapshot.labelState);
@@ -634,6 +674,7 @@ function setLoading(isLoading, label = "Tracing") {
   els.traceButton.disabled = isLoading;
   els.expandNodeButton.disabled = isLoading;
   els.loadSampleButton.disabled = isLoading;
+  els.dustFilterButton.disabled = isLoading;
   els.traceButton.textContent = isLoading ? label : "Trace";
   els.expandNodeButton.textContent = isLoading && label === "Expanding" ? "Expanding" : "Expand node";
   if (!isLoading && trace?.graphSnapshot) renderSelected(trace.graphSnapshot);
@@ -739,23 +780,38 @@ function applyExpansionLineage(parentId, nextTrace) {
   const graph = trace.graphSnapshot;
   const parentDepth = nodeDepthById.get(parentId) ?? lineageDirection(parentId, graph);
   const direction = parentDepth < 0 ? -1 : 1;
-  const nextDepth = parentDepth + direction;
 
   nodeDepthById.set(parentId, parentDepth);
 
   const nextNodeIds = new Set((nextTrace.graphSnapshot?.nodes || []).map((node) => node.id));
-  const candidateIds = new Set();
+  const adjacency = new Map();
 
   for (const edge of nextTrace.graphSnapshot?.edges || []) {
-    if (edge.from === parentId && nextNodeIds.has(edge.to)) candidateIds.add(edge.to);
-    if (edge.to === parentId && nextNodeIds.has(edge.from)) candidateIds.add(edge.from);
+    if (!nextNodeIds.has(edge.from) || !nextNodeIds.has(edge.to)) continue;
+    if (!adjacency.has(edge.from)) adjacency.set(edge.from, new Set());
+    if (!adjacency.has(edge.to)) adjacency.set(edge.to, new Set());
+    adjacency.get(edge.from).add(edge.to);
+    adjacency.get(edge.to).add(edge.from);
   }
 
-  for (const nodeId of candidateIds) {
-    if (nodeId === parentId || nodeId === graph.seedAddress || nodeId.startsWith("protocol:")) continue;
-    if (nodeDepthById.has(nodeId)) continue;
-    nodeDepthById.set(nodeId, nextDepth);
-    nodeParentById.set(nodeId, parentId);
+  const visited = new Set([parentId]);
+  const queue = [{ nodeId: parentId, hop: 0 }];
+
+  while (queue.length) {
+    const current = queue.shift();
+    for (const nodeId of adjacency.get(current.nodeId) || []) {
+      if (visited.has(nodeId)) continue;
+      visited.add(nodeId);
+
+      const nextHop = current.hop + 1;
+      const isRealAddress = nodeId !== graph.seedAddress && !nodeId.startsWith("protocol:");
+      if (isRealAddress && !nodeDepthById.has(nodeId)) {
+        nodeDepthById.set(nodeId, parentDepth + direction * nextHop);
+        nodeParentById.set(nodeId, current.nodeId);
+      }
+
+      queue.push({ nodeId, hop: nextHop });
+    }
   }
 }
 
@@ -772,7 +828,15 @@ function render() {
   renderLabelList(graph);
   renderSelected(graph);
   renderFlowDetails(graph);
+  renderDustFilterButton();
   updateUndoButton();
+  els.mintSnapshotButton.disabled = false;
+}
+
+function renderDustFilterButton() {
+  els.dustFilterButton.textContent = dustFilterEnabled ? "Dust hidden" : "Hide dust";
+  els.dustFilterButton.classList.toggle("active", dustFilterEnabled);
+  els.dustFilterButton.setAttribute("aria-pressed", String(dustFilterEnabled));
 }
 
 function renderHistoryHint() {
@@ -783,9 +847,11 @@ function renderHistoryHint() {
 
   const limit = Number(els.limitSelect.value);
   if (limit < 50) {
-    els.historyHint.textContent = `More history exists. Switch to Last ${limit < 25 ? "25 or 50" : "50"} to include older activity.`;
+    els.historyHint.textContent = "More history exists. Switch to Last 50 or 100 to include older activity.";
+  } else if (limit < 100) {
+    els.historyHint.textContent = "More history exists. Switch to Last 100 to include older activity.";
   } else {
-    els.historyHint.textContent = "More history exists beyond the current result window.";
+    els.historyHint.textContent = "More history exists beyond the current 100 transaction window.";
   }
 }
 
@@ -1321,6 +1387,22 @@ function showAllHiddenItems() {
   render();
 }
 
+function selectedFlowIsVisible() {
+  if (!trace || !selectedFlowKey) return false;
+  return visualDisplayEdges(withDisplayLanes(aggregateDisplayEdges(visibleEdges(trace.graphSnapshot))))
+    .some((edge) => edge.key === selectedFlowKey);
+}
+
+function toggleDustFilter() {
+  if (!trace) return;
+  pushUndoState();
+  dustFilterEnabled = !dustFilterEnabled;
+  if (selectedFlowKey && !selectedFlowIsVisible()) {
+    selectedFlowKey = null;
+  }
+  render();
+}
+
 function toggleLabel(nodeId, label) {
   if (!trace) return;
   pushUndoState();
@@ -1331,34 +1413,388 @@ function toggleLabel(nodeId, label) {
   render();
 }
 
-function exportSummary() {
-  const graph = trace.graphSnapshot;
-  const selected = graph.nodes.map((node) => ({
-    address: node.address,
-    labels: nodeLabels(node),
-  }));
-  const lines = [
-    `Sui CaseFlow summary`,
-    `Seed: ${trace.seedAddress}`,
-    `Transactions: ${trace.txCount}`,
-    `Nodes: ${graph.nodes.length}`,
-    `Probable flows: ${graph.edges.length}`,
-    ``,
-    `Flows:`,
-    ...graph.edges.map((edge) => {
-      return `- ${shortAddress(edge.from)} -> ${shortAddress(edge.to)} ${edgeLabel(edge)} (${txUrl(edge.txDigest)})`;
-    }),
-    ``,
-    `Labels:`,
-    ...selected.filter((node) => node.labels.length).map((node) => `- ${shortAddress(node.address)}: ${node.labels.join(", ")}`),
-  ];
-
-  navigator.clipboard?.writeText(lines.join("\n"));
-  els.exportButton.textContent = "✓";
-  setTimeout(() => {
-    els.exportButton.textContent = "⇩";
-  }, 900);
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalize(item)]),
+  );
 }
+
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function svgDataUrl(svgText) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText)}`;
+}
+
+function snapshotStyleText() {
+  return `
+    .edge-line{fill:none;stroke:#146c94;stroke-width:2.5}
+    .edge-line.inbound{stroke:#146c94}.edge-line.outbound{stroke:#b23a48}.edge-line.neutral{stroke:#146c94}
+    .edge-line.bidirectional,.edge-line.selected{stroke:#FFDC35;stroke-width:3.5}
+    .edge-label{paint-order:stroke;stroke:#fff;stroke-width:5px;stroke-linejoin:round;fill:#1d252c;font:800 12px Inter,Arial,sans-serif}
+    .node circle{stroke:#fff;stroke-width:4;filter:drop-shadow(0 8px 14px rgba(29,37,44,.18))}
+    .node.seed circle{fill:#b23a48}.node.peer circle{fill:#1f8a70}.node.protocol circle{fill:#635bff}
+    .node.selected circle{stroke:#FFDC35;stroke-width:6}
+    .node text{fill:#1d252c;font:850 12px Inter,Arial,sans-serif;text-anchor:middle}
+  `;
+}
+
+function currentGraphSvgText() {
+  const clone = els.flowGraph.cloneNode(true);
+  const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = snapshotStyleText();
+  clone.insertBefore(style, clone.firstChild);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", String(Math.round(els.flowGraph.clientWidth || 1200)));
+  clone.setAttribute("height", String(Math.round(els.flowGraph.clientHeight || 800)));
+  return new XMLSerializer().serializeToString(clone);
+}
+
+function snapshotDownloadName(extension) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `caseflow-${shortAddress(trace?.seedAddress || "snapshot").replace("...", "-")}-${stamp}.${extension}`;
+}
+
+function downloadTextFile(filename, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function txDigestsFromEdges(edges) {
+  return Array.from(new Set(edges.flatMap((edge) => edge.items || [edge]).map((edge) => edge.txDigest))).filter(Boolean);
+}
+
+async function createEvidenceSnapshot() {
+  if (!trace?.graphSnapshot) throw new Error("Trace a case before minting a snapshot.");
+  renderGraph(trace.graphSnapshot);
+
+  const graph = trace.graphSnapshot;
+  const visibleNodes = visibleGraphNodes(graph).map((node) => ({
+    id: node.id,
+    address: node.address,
+    shortAddress: node.shortAddress || shortAddress(node.address),
+    labels: nodeLabels(node),
+    position: currentPositions.get(node.id) || null,
+  }));
+  const rawVisibleEdges = visibleEdges(graph);
+  const displayEdges = visualDisplayEdges(withDisplayLanes(aggregateDisplayEdges(rawVisibleEdges))).map((edge) => ({
+    key: edge.key,
+    from: edge.from,
+    to: edge.to,
+    label: edgeLabel(edge),
+    isBidirectional: Boolean(edge.isBidirectional),
+    txCount: edge.txCount || 1,
+    assetCount: edge.assetCount || 1,
+    txDigests: edge.txDigests || txDigestsFromEdges([edge]),
+    items: (edge.items || [edge]).map((item) => ({
+      txDigest: item.txDigest,
+      from: item.from,
+      to: item.to,
+      coinType: item.coinType,
+      coinSymbol: item.coinSymbol,
+      amount: item.amount,
+      displayAmount: edgeLabel(item),
+      timestampMs: item.timestampMs,
+      confidence: item.confidence,
+    })),
+  }));
+
+  const svgText = currentGraphSvgText();
+  const imageHash = await sha256Hex(svgText);
+  const createdAtMs = Date.now();
+  const snapshotCore = {
+    kind: "sui-caseflow/evidence-snapshot",
+    version: 1,
+    createdAtMs,
+    network: "sui:mainnet-source/testnet-mint",
+    seedAddress: trace.seedAddress,
+    sourceTxCount: trace.txCount,
+    visibleNodeCount: visibleNodes.length,
+    visibleFlowCount: rawVisibleEdges.length,
+    visibleDisplayFlowCount: displayEdges.length,
+    txDigests: txDigestsFromEdges(rawVisibleEdges),
+    filters: {
+      dustFilterEnabled,
+    },
+    nodes: visibleNodes,
+    flows: displayEdges,
+    viewport: cloneValue(viewportState),
+    image: {
+      format: "svg",
+      sha256: imageHash,
+    },
+  };
+  const snapshotJson = `${JSON.stringify(canonicalize(snapshotCore), null, 2)}\n`;
+  const snapshotHash = await sha256Hex(snapshotJson);
+  const metadata = {
+    name: `Sui CaseFlow Snapshot ${shortAddress(trace.seedAddress)}`,
+    description: `Case snapshot for seed ${trace.seedAddress}. This is a testnet artifact, not a legal attestation.`,
+    image_url: `local://caseflow/${snapshotHash}.svg`,
+    snapshot_url: `local://caseflow/${snapshotHash}.json`,
+    snapshot_hash: snapshotHash,
+    seed_address: trace.seedAddress,
+    created_at_ms: createdAtMs,
+  };
+
+  return {
+    svgText,
+    svgDataUrl: svgDataUrl(svgText),
+    snapshot: { ...snapshotCore, snapshotHash, metadata },
+    snapshotJson,
+    snapshotHash,
+    metadata,
+  };
+}
+
+function setMintStatus(message, state = "") {
+  els.mintStatus.textContent = message;
+  els.mintStatus.className = `mint-status ${state}`.trim();
+}
+
+async function openMintPreview() {
+  if (!trace?.graphSnapshot) return;
+  els.mintSnapshotButton.disabled = true;
+  setMintStatus("Preparing case snapshot...");
+  try {
+    pendingSnapshot = await createEvidenceSnapshot();
+    els.snapshotPreview.src = pendingSnapshot.svgDataUrl;
+    els.snapshotSeed.textContent = pendingSnapshot.metadata.seed_address;
+    els.snapshotStats.textContent = `${pendingSnapshot.snapshot.visibleNodeCount} nodes · ${pendingSnapshot.snapshot.visibleDisplayFlowCount} visual flows · ${pendingSnapshot.snapshot.txDigests.length} txs`;
+    els.snapshotHash.textContent = pendingSnapshot.snapshotHash;
+    setMintStatus("Preview ready. Download a report, export JSON, or mint on Sui testnet.");
+    els.mintDialog.showModal();
+  } catch (error) {
+    pendingSnapshot = null;
+    setMintStatus(error.message, "error");
+  } finally {
+    els.mintSnapshotButton.disabled = false;
+  }
+}
+
+function closeMintPreview() {
+  els.mintDialog.close();
+}
+
+function reportEscape(value) {
+  return escapeHtml(String(value ?? ""));
+}
+
+function reportDate(timestampMs) {
+  if (!timestampMs) return "No timestamp";
+  return new Intl.DateTimeFormat("en", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(Number(timestampMs)));
+}
+
+function reportAddressHtml(address) {
+  const label = reportEscape(shortAddress(address));
+  if (!isSuiAddress(address)) return label;
+  return `<a href="${reportEscape(accountUrl(address))}" target="_blank" rel="noreferrer">${label}</a>`;
+}
+
+function reportFullAddressHtml(address) {
+  if (!isSuiAddress(address)) return reportEscape(address);
+  return `<a href="${reportEscape(accountUrl(address))}" target="_blank" rel="noreferrer">${reportEscape(address)}</a>`;
+}
+
+function reportTxHtml(txDigest) {
+  if (!txDigest) return "";
+  return `<a href="${reportEscape(txUrl(txDigest))}" target="_blank" rel="noreferrer">${reportEscape(shortAddress(txDigest))}</a>`;
+}
+
+function buildCaseReportHtml(snapshotBundle) {
+  const { snapshot, svgText, snapshotHash } = snapshotBundle;
+  const generatedAt = reportDate(snapshot.createdAtMs);
+  const labeledNodes = snapshot.nodes.filter((node) => (node.labels || []).length > 0);
+  const flowTime = (flow) => Math.min(...(flow.items || [])
+    .map((item) => Number(item.timestampMs || 0))
+    .filter((timestamp) => timestamp > 0));
+  const sortedFlows = [...snapshot.flows].sort((a, b) => {
+    const left = flowTime(a);
+    const right = flowTime(b);
+    const leftTime = Number.isFinite(left) ? left : Number.POSITIVE_INFINITY;
+    const rightTime = Number.isFinite(right) ? right : Number.POSITIVE_INFINITY;
+    return leftTime - rightTime;
+  });
+  const labelRows = labeledNodes.length
+    ? labeledNodes.map((node) => `
+      <tr>
+        <td>${reportFullAddressHtml(node.address || node.id)}</td>
+        <td>${(node.labels || []).map((label) => `<span class="tag">${reportEscape(label)}</span>`).join(" ")}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="2" class="muted">No labels in the visible graph.</td></tr>`;
+
+  const flowRows = sortedFlows.length
+    ? sortedFlows.map((flow) => {
+      const direction = flow.isBidirectional ? "<->" : "->";
+      return `
+        <tr>
+          <td>${reportAddressHtml(flow.from)}</td>
+          <td class="direction">${direction}</td>
+          <td>${reportAddressHtml(flow.to)}</td>
+          <td>${reportEscape(flow.label)}</td>
+          <td>${reportEscape(flow.txCount || 0)}</td>
+          <td>${reportTxHtml((flow.txDigests || [])[0])}</td>
+        </tr>`;
+    }).join("")
+    : `<tr><td colspan="6" class="muted">No visible flows.</td></tr>`;
+
+  const evidenceSections = sortedFlows.map((flow) => {
+    const items = [...(flow.items || [])].sort((a, b) => {
+      const left = Number(a.timestampMs || 0) || Number.POSITIVE_INFINITY;
+      const right = Number(b.timestampMs || 0) || Number.POSITIVE_INFINITY;
+      return left - right;
+    });
+    const visibleItems = items.slice(0, 5);
+    const extraCount = Math.max(0, items.length - visibleItems.length);
+    const itemRows = visibleItems.map((item) => `
+      <tr>
+        <td>${reportEscape(item.displayAmount || "")}</td>
+        <td>${reportDate(item.timestampMs)}</td>
+        <td>${reportAddressHtml(item.from)} <span class="direction">-></span> ${reportAddressHtml(item.to)}</td>
+        <td>${reportTxHtml(item.txDigest)}</td>
+      </tr>`).join("");
+    return `
+      <section class="flow-evidence">
+        <h3>${reportAddressHtml(flow.from)} ${flow.isBidirectional ? "<->" : "->"} ${reportAddressHtml(flow.to)}</h3>
+        <p class="muted">${reportEscape(flow.label)} · ${reportEscape(flow.txCount || 0)} transaction${flow.txCount === 1 ? "" : "s"}</p>
+        <table>
+          <thead><tr><th>Amount</th><th>Time</th><th>Direction</th><th>Tx</th></tr></thead>
+          <tbody>${itemRows || `<tr><td colspan="4" class="muted">No transaction items.</td></tr>`}</tbody>
+        </table>
+        ${extraCount ? `<p class="muted">+ ${extraCount} more transaction${extraCount === 1 ? "" : "s"} in the snapshot JSON.</p>` : ""}
+      </section>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sui CaseFlow Investigation Report</title>
+  <style>
+    :root{color-scheme:light;--ink:#1d252c;--muted:#66727f;--line:#d5ddd8;--paper:#f7f5ef;--card:#fff;--blue:#146c94;--red:#b23a48;--gold:#ffdc35;--green:#1f8a70}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,Arial,sans-serif;line-height:1.45}.page{max-width:1180px;margin:0 auto;padding:32px}header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}h1{font-size:34px;margin:0 0 8px}h2{font-size:22px;margin:28px 0 12px}h3{font-size:16px;margin:0 0 6px}.eyebrow{letter-spacing:.08em;text-transform:uppercase;font-weight:800;color:var(--muted);font-size:13px;margin:0 0 6px}.muted{color:var(--muted)}a{color:var(--blue);font-weight:750;text-decoration:none}a:hover{text-decoration:underline}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:20px 0}.stat,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}.stat strong{display:block;font-size:28px}.snapshot{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto}.snapshot svg{width:100%;height:auto;display:block;max-height:720px}table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:0 0 14px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:10px 12px;vertical-align:top}th{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;background:#fbfaf6}tr:last-child td{border-bottom:0}.tag{display:inline-block;border:1px solid var(--green);color:#11624f;background:#edf8f3;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:800;margin:0 4px 4px 0}.direction{color:var(--muted);font-weight:800}.flow-evidence{break-inside:avoid;margin-bottom:18px}.hash{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all}.footer{margin-top:28px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:14px}@media print{body{background:#fff}.page{max-width:none;padding:18px}.stats{grid-template-columns:repeat(4,1fr)}a{color:inherit;text-decoration:underline}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <p class="eyebrow">Sui CaseFlow</p>
+        <h1>Investigation Report</h1>
+        <p class="muted">Generated ${reportEscape(generatedAt)} · Network: Sui Mainnet</p>
+      </div>
+      <div class="card">
+        <p class="eyebrow">Seed address</p>
+        <p class="hash">${reportFullAddressHtml(snapshot.seedAddress)}</p>
+      </div>
+    </header>
+
+    <section class="stats" aria-label="Case overview">
+      <div class="stat"><strong>${reportEscape(snapshot.visibleNodeCount)}</strong><span>Visible nodes</span></div>
+      <div class="stat"><strong>${reportEscape(snapshot.visibleDisplayFlowCount)}</strong><span>Visual flows</span></div>
+      <div class="stat"><strong>${reportEscape(snapshot.txDigests.length)}</strong><span>Transactions</span></div>
+      <div class="stat"><strong>${snapshot.filters?.dustFilterEnabled ? "On" : "Off"}</strong><span>Dust filter</span></div>
+    </section>
+
+    <section>
+      <h2>Visual Snapshot</h2>
+      <div class="snapshot">${svgText}</div>
+    </section>
+
+    <section>
+      <h2>Address Labels</h2>
+      <table><thead><tr><th>Address</th><th>Labels</th></tr></thead><tbody>${labelRows}</tbody></table>
+    </section>
+
+    <section>
+      <h2>Key Fund Flows</h2>
+      <table><thead><tr><th>From</th><th></th><th>To</th><th>Flow</th><th>Tx Count</th><th>Evidence</th></tr></thead><tbody>${flowRows}</tbody></table>
+    </section>
+
+    <section>
+      <h2>Transaction Evidence</h2>
+      ${evidenceSections || `<p class="muted">No visible transaction evidence.</p>`}
+    </section>
+
+    <section>
+      <h2>Data Integrity</h2>
+      <div class="card">
+        <p><strong>Snapshot hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshotHash)}</p>
+        <p><strong>Image hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshot.image?.sha256 || "")}</p>
+      </div>
+    </section>
+
+    <p class="footer">This report is generated from the visible Sui CaseFlow graph. Hidden nodes and hidden flows are excluded. The HTML report is for human review; the JSON snapshot is the machine-readable data package.</p>
+  </main>
+</body>
+</html>`;
+}
+
+function downloadCaseReport() {
+  if (!pendingSnapshot) return;
+  downloadTextFile(snapshotDownloadName("html"), buildCaseReportHtml(pendingSnapshot), "text/html;charset=utf-8");
+}
+
+function downloadSnapshotJson() {
+  if (!pendingSnapshot) return;
+  downloadTextFile(snapshotDownloadName("json"), pendingSnapshot.snapshotJson, "application/json;charset=utf-8");
+}
+
+function mintedObjectId(result) {
+  const objectChange = result?.objectChanges?.find((change) => change.type === "created" && change.objectType?.includes("::snapshot_nft::CaseSnapshotNFT"));
+  return objectChange?.objectId || result?.effects?.created?.[0]?.reference?.objectId || "";
+}
+
+async function confirmMintSnapshot() {
+  if (!pendingSnapshot) return;
+  els.confirmMintButton.disabled = true;
+  setMintStatus("Opening Sui wallet for testnet mint...");
+  try {
+    const { mintSnapshot } = await import("./src/mint-snapshot.js");
+    const result = await mintSnapshot({ metadata: pendingSnapshot.metadata });
+    const objectId = mintedObjectId(result);
+    const digest = result?.digest || result?.effects?.transactionDigest || "";
+    if (objectId) {
+      setMintStatus("", "success");
+      els.mintStatus.append("Minted snapshot object ");
+      const objectLink = document.createElement("a");
+      objectLink.href = testnetObjectUrl(objectId);
+      objectLink.target = "_blank";
+      objectLink.rel = "noreferrer";
+      objectLink.textContent = shortAddress(objectId);
+      els.mintStatus.append(objectLink);
+      if (digest) els.mintStatus.append(` · tx ${shortAddress(digest)}`);
+    } else {
+      setMintStatus(`Mint submitted${digest ? ` · tx ${shortAddress(digest)}` : ""}. Check your testnet wallet for the created object.`, "success");
+    }
+  } catch (error) {
+    setMintStatus(error.message, "error");
+  } finally {
+    els.confirmMintButton.disabled = false;
+  }
+}
+
 
 function svgEl(tag, attrs = {}) {
   const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -1386,8 +1822,13 @@ els.traceButton.addEventListener("click", traceAddress);
 els.expandNodeButton.addEventListener("click", expandSelectedNode);
 els.undoButton.addEventListener("click", undoLastAction);
 els.showAllButton.addEventListener("click", showAllHiddenItems);
+els.dustFilterButton.addEventListener("click", toggleDustFilter);
 els.fitButton.addEventListener("click", resetCurrentViewport);
-els.exportButton.addEventListener("click", exportSummary);
+els.mintSnapshotButton.addEventListener("click", openMintPreview);
+els.closeMintButton.addEventListener("click", closeMintPreview);
+els.downloadReportButton.addEventListener("click", downloadCaseReport);
+els.downloadSnapshotButton.addEventListener("click", downloadSnapshotJson);
+els.confirmMintButton.addEventListener("click", confirmMintSnapshot);
 els.hideNodeButton.addEventListener("click", hideSelectedNode);
 els.hideFlowButton.addEventListener("click", hideSelectedFlow);
 els.flowGraph.addEventListener("wheel", zoomGraph, { passive: false });

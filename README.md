@@ -17,19 +17,35 @@ Input any Sui address, fetch recent transaction blocks, parse balance changes, a
 Start the local app:
 
 ```bash
-node server.mjs
-```
-
-If port 5173 is already in use:
-
-```bash
 PORT=5174 node server.mjs
 ```
 
 Then open:
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5174
+```
+
+If port 5174 is already in use:
+
+```bash
+PORT=5175 node server.mjs
+```
+
+### Snapshot NFT dev mode
+
+The normal Node server can generate and download evidence snapshots. To enable wallet-based testnet minting, install the Vite/Sui dependencies and run the static app through Vite while the API server runs on port 5173:
+
+```bash
+npm install
+node server.mjs
+npm run dev
+```
+
+Deploy `move/caseflow_snapshot` to Sui testnet, copy `.env.example` to `.env`, and set:
+
+```bash
+VITE_CASEFLOW_SNAPSHOT_PACKAGE_ID=0xYOUR_TESTNET_PACKAGE_ID
 ```
 
 Run the proof-of-concept with a Sui address:

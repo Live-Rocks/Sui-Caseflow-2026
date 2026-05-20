@@ -1,0 +1,17 @@
+{
+  "name": "sui-caseflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5174",
+    "server": "PORT=5174 node server.mjs",
+    "check": "node --check app.js && node --check server.mjs && node --check src/mint-snapshot.js"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.38.0",
+    "@mysten/wallet-standard": "^0.17.0",
+    "vite": "^6.3.0"
+  },
+  "devDependencies": {}
+}

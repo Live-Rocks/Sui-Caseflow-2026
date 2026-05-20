@@ -5,6 +5,7 @@ const RPC_URLS = {
   testnet: "https://fullnode.testnet.sui.io:443",
   devnet: "https://fullnode.devnet.sui.io:443",
 };
+const MAX_TRANSACTION_PAGE_SIZE = 50;
 const MAX_INFERRED_EDGES_PER_COIN = 25;
 const PROTOCOL_ACTIVITY_NODE_ID = "protocol:activity";
 const PROTOCOL_BRIDGE_NODE_ID = "protocol:bridge";
@@ -58,8 +59,8 @@ function assertValidArgs(args) {
     process.exit(1);
   }
 
-  if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 50) {
-    console.error("--limit must be an integer from 1 to 50");
+  if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 100) {
+    console.error("--limit must be an integer from 1 to 100");
     process.exit(1);
   }
 
@@ -421,21 +422,49 @@ function buildGraphSnapshot(address, network, transactions, metadataByCoinType) 
 }
 
 async function queryAddressByFilter({ filter, limit, network }) {
-  return rpc(network, "suix_queryTransactionBlocks", [
-    {
-      filter,
-      options: {
-        showBalanceChanges: true,
-        showEffects: true,
-        showEvents: true,
-        showObjectChanges: true,
-        showInput: true,
+  const data = [];
+  let cursor = null;
+  let hasNextPage = false;
+  let nextCursor = null;
+  let pageCount = 0;
+
+  do {
+    const remaining = limit - data.length;
+    if (remaining <= 0) break;
+
+    const pageLimit = Math.min(MAX_TRANSACTION_PAGE_SIZE, remaining);
+    const page = await rpc(network, "suix_queryTransactionBlocks", [
+      {
+        filter,
+        options: {
+          showBalanceChanges: true,
+          showEffects: true,
+          showEvents: true,
+          showObjectChanges: true,
+          showInput: true,
+        },
       },
-    },
-    null,
-    limit,
-    true,
-  ]);
+      cursor,
+      pageLimit,
+      true,
+    ]);
+
+    pageCount += 1;
+    data.push(...(page.data || []));
+    hasNextPage = Boolean(page.hasNextPage);
+    nextCursor = page.nextCursor || null;
+    cursor = nextCursor;
+
+    if (!hasNextPage || !nextCursor || (page.data || []).length === 0) break;
+  } while (data.length < limit);
+
+  return {
+    data,
+    nextCursor,
+    hasNextPage,
+    pageCount,
+    requestedCount: limit,
+  };
 }
 
 async function fetchCoinMetadata(network, coinType) {
@@ -489,6 +518,8 @@ function mergeTransactionPages(pages, limit) {
       nextCursor: page.nextCursor,
       hasNextPage: page.hasNextPage,
       count: page.data?.length || 0,
+      pageCount: page.pageCount || 1,
+      requestedCount: page.requestedCount || limit,
     })),
   };
 }

@@ -254,6 +254,14 @@ select {
   font-size: 17px;
 }
 
+.undo-icon {
+  display: inline-block;
+  transform: rotate(90deg);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .close-button,
 .inline-close-button {
   display: grid;
@@ -330,6 +338,17 @@ select {
 
 .toolbar-actions {
   gap: 8px;
+}
+
+.toolbar-actions .secondary-button {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.secondary-button.active {
+  border-color: var(--gold);
+  background: #fff7c7;
+  color: var(--ink);
 }
 
 .graph-surface {
@@ -525,6 +544,97 @@ select {
 
 a.digest-text:hover {
   color: var(--blue);
+}
+
+.mint-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  border: 0;
+  border-radius: 10px;
+  padding: 0;
+  background: transparent;
+}
+
+.mint-dialog::backdrop {
+  background: rgba(29, 37, 44, 0.42);
+}
+
+.mint-card {
+  position: relative;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px;
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(29, 37, 44, 0.22);
+}
+
+.mint-card h2 {
+  font-size: 22px;
+}
+
+.mint-preview-frame {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.mint-preview-frame img {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+}
+
+.mint-meta {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.mint-meta div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.mint-meta dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.mint-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--ink);
+}
+
+.mint-status {
+  min-height: 20px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mint-status.error {
+  color: var(--red);
+}
+
+.mint-status.success {
+  color: var(--green);
+}
+
+.mint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
 }
 
 @media (max-width: 1180px) {

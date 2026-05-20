@@ -1,0 +1,9 @@
+[package]
+name = "caseflow_snapshot"
+edition = "2024.beta"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+caseflow_snapshot = "0x0"
