@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sui CaseFlow</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">SC</div>
+          <div>
+            <h1>Sui CaseFlow</h1>
+            <p>Investigation workspace</p>
+          </div>
+        </div>
+
+        <section class="panel input-panel">
+          <label for="addressInput">Seed address</label>
+          <textarea id="addressInput" spellcheck="false"></textarea>
+          <div class="field-row">
+            <label for="limitSelect">Transaction limit</label>
+            <select id="limitSelect">
+              <option value="25" selected>Last 25</option>
+              <option value="50">Last 50</option>
+            </select>
+          </div>
+          <div class="input-actions">
+            <button id="loadSampleButton" class="icon-button" title="Load sample trace" aria-label="Load sample trace">↻</button>
+            <button id="traceButton" class="primary-button">Trace</button>
+          </div>
+          <p id="historyHint" class="history-hint"></p>
+        </section>
+
+        <section class="panel stats-panel">
+          <div>
+            <span class="stat-value" id="nodeCount">0</span>
+            <span class="stat-label">Nodes</span>
+          </div>
+          <div>
+            <span class="stat-value" id="edgeCount">0</span>
+            <span class="stat-label">Flows</span>
+          </div>
+          <div>
+            <span class="stat-value" id="txCount">0</span>
+            <span class="stat-label">Txs</span>
+          </div>
+        </section>
+
+        <section class="panel label-panel">
+          <h2>Case Labels</h2>
+          <div id="labelList" class="label-list"></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="toolbar">
+          <div>
+            <p class="eyebrow">Mainnet trace</p>
+            <h2 id="caseTitle">Loading trace</h2>
+          </div>
+          <div class="toolbar-actions">
+            <button id="undoButton" class="icon-button" title="Undo last action" aria-label="Undo last action" disabled>↶</button>
+            <button id="showAllButton" class="icon-button" title="Show hidden items" aria-label="Show hidden items">◉</button>
+            <button id="fitButton" class="icon-button" title="Fit graph" aria-label="Fit graph">⌖</button>
+            <button id="exportButton" class="icon-button" title="Export summary" aria-label="Export summary">⇩</button>
+          </div>
+        </header>
+
+        <section class="graph-surface" aria-label="Fund flow graph">
+          <svg id="flowGraph" role="img"></svg>
+        </section>
+      </main>
+
+      <aside class="timeline">
+        <section class="panel selected-panel">
+          <button id="hideNodeButton" class="close-button" title="Hide selected node" aria-label="Hide selected node">×</button>
+          <p class="eyebrow">Selected node</p>
+          <h2 id="selectedTitle">Seed</h2>
+          <p id="selectedAddress" class="address-text"></p>
+          <button id="expandNodeButton" class="secondary-button node-action-button">Expand node</button>
+          <div class="label-controls" id="labelControls"></div>
+        </section>
+
+        <section class="panel flow-panel" id="flowPanel">
+          <button id="hideFlowButton" class="close-button" title="Hide selected flow" aria-label="Hide selected flow">×</button>
+          <p class="eyebrow">Flow details</p>
+          <h2 id="flowTitle">Select a flow</h2>
+          <p id="flowSummary" class="address-text">Click a line in the graph to inspect every transaction inside that aggregated flow.</p>
+          <div id="flowList" class="flow-list"></div>
+        </section>
+      </aside>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
