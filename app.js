@@ -4,6 +4,7 @@ const LABELS = ["hacker", "intermediate", "bridge", "exchange_suspect", "known_e
 const MAX_UNDO_STEPS = 20;
 const SUI_COIN_TYPE = "0x2::sui::SUI";
 const DUST_SUI_THRESHOLD = 5_000_000n;
+const AUTH_STORAGE_KEY = "sui-caseflow-auth-session";
 
 let trace = null;
 let selectedNodeId = SAMPLE_ADDRESS;
@@ -13,6 +14,9 @@ let panState = null;
 let viewportState = null;
 let pendingSnapshot = null;
 let dustFilterEnabled = false;
+let authSession = null;
+let mySnapshots = [];
+let walletDropdownOpen = false;
 const manualPositions = new Map();
 let currentPositions = new Map();
 const labelState = new Map();
@@ -29,6 +33,12 @@ const els = {
   loadSampleButton: document.querySelector("#loadSampleButton"),
   traceButton: document.querySelector("#traceButton"),
   historyHint: document.querySelector("#historyHint"),
+  walletMenu: document.querySelector("#walletMenu"),
+  walletButton: document.querySelector("#walletButton"),
+  walletDropdown: document.querySelector("#walletDropdown"),
+  signOutButton: document.querySelector("#signOutButton"),
+  authStatus: document.querySelector("#authStatus"),
+  snapshotList: document.querySelector("#snapshotList"),
   undoButton: document.querySelector("#undoButton"),
   showAllButton: document.querySelector("#showAllButton"),
   dustFilterButton: document.querySelector("#dustFilterButton"),
@@ -58,6 +68,7 @@ const els = {
   mintStatus: document.querySelector("#mintStatus"),
   downloadReportButton: document.querySelector("#downloadReportButton"),
   downloadSnapshotButton: document.querySelector("#downloadSnapshotButton"),
+  uploadWalrusButton: document.querySelector("#uploadWalrusButton"),
   confirmMintButton: document.querySelector("#confirmMintButton"),
 };
 
@@ -77,6 +88,330 @@ function accountUrl(address) {
 
 function testnetObjectUrl(objectId) {
   return `${EXPLORER_BASE_URL}/object/${encodeURIComponent(objectId)}?network=testnet`;
+}
+
+function setAuthStatus(message, state = "") {
+  els.authStatus.textContent = message;
+  els.authStatus.className = `auth-status ${state}`.trim();
+}
+
+function storedAuthSession() {
+  try {
+    const value = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null");
+    if (!value?.token || !value?.address || Date.now() > Number(value.expiresAt || 0)) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSession(session) {
+  authSession = session;
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+  renderAuthState();
+}
+
+function clearAuthSession() {
+  authSession = null;
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+  mySnapshots = [];
+  renderAuthState();
+}
+
+function authHeaders() {
+  return authSession?.token ? { authorization: `Bearer ${authSession.token}` } : {};
+}
+
+function setWalletDropdownOpen(open) {
+  walletDropdownOpen = Boolean(open);
+  els.walletDropdown.hidden = !walletDropdownOpen;
+  els.walletButton.setAttribute("aria-expanded", String(walletDropdownOpen));
+}
+
+function closeWalletDropdown() {
+  setWalletDropdownOpen(false);
+}
+
+function renderAuthState() {
+  if (authSession?.address) {
+    els.walletButton.textContent = shortAddress(authSession.address);
+    els.walletButton.title = authSession.address;
+    els.signOutButton.hidden = false;
+    setAuthStatus("Signed in. Walrus uploads will be saved to My Snapshots.", "success");
+  } else {
+    els.walletButton.textContent = "Connect Wallet";
+    els.walletButton.removeAttribute("title");
+    els.signOutButton.hidden = true;
+    closeWalletDropdown();
+    setAuthStatus("Connect wallet to save Walrus snapshots.");
+  }
+  renderSnapshotList();
+}
+
+function snapshotTime(record) {
+  return record.uploaded_at || (record.created_at_ms ? new Date(Number(record.created_at_ms)).toISOString() : "");
+}
+
+function recordDisplayTime(record) {
+  const value = snapshotTime(record);
+  if (!value) return "No time";
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? reportDate(timestamp) : "No time";
+}
+
+function recordShortQuilt(record) {
+  return record.quilt_id ? shortAddress(record.quilt_id) : "No quilt";
+}
+
+function stopSnapshotClick(event) {
+  event.stopPropagation();
+}
+
+async function restoreSnapshotRecord(record) {
+  if (!record?.snapshot_url) return;
+  const confirmed = window.confirm("Restore this snapshot to the workspace? Current unsaved graph state will be replaced.");
+  if (!confirmed) return;
+
+  setAuthStatus("Restoring snapshot from Walrus...");
+  try {
+    const response = await fetch(`/api/walrus/read-json?url=${encodeURIComponent(record.snapshot_url)}`);
+    const snapshot = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(snapshot.error || "Could not read snapshot from Walrus.");
+    restoreCaseSnapshot(snapshot, record);
+    setAuthStatus("Snapshot restored to workspace.", "success");
+    closeWalletDropdown();
+  } catch (error) {
+    setAuthStatus(error.message, "error");
+  }
+}
+
+function snapshotNodeToGraphNode(node, seedAddress) {
+  const id = node.id || node.address;
+  const address = node.address || id;
+  const labels = normalizeNodeLabels(id, node.labels || []);
+  if (id === seedAddress && !labels.includes("seed")) labels.push("seed");
+  return {
+    id,
+    address,
+    shortAddress: node.shortAddress || shortAddress(address),
+    labels,
+  };
+}
+
+function snapshotItemToEdge(item, index) {
+  return {
+    id: `snapshot:${item.txDigest || index}:${item.coinType || "unknown"}:${item.from}:${item.to}:${index}`,
+    from: item.from,
+    to: item.to,
+    coinType: item.coinType || "unknown",
+    coinSymbol: item.coinSymbol || coinSymbol(item.coinType || "unknown"),
+    coinDecimals: item.coinDecimals,
+    amount: String(item.amount ?? "0"),
+    txDigest: item.txDigest || `snapshot-${index}`,
+    timestampMs: item.timestampMs,
+    confidence: item.confidence || "snapshot",
+  };
+}
+
+function snapshotFlowToEdges(flow, offset) {
+  const items = flow.items?.length ? flow.items : [{
+    txDigest: (flow.txDigests || [])[0],
+    from: flow.from,
+    to: flow.to,
+    coinType: flow.coinType || "unknown",
+    coinSymbol: flow.coinSymbol,
+    amount: flow.amount || "0",
+  }];
+  return items.map((item, index) => snapshotItemToEdge(item, offset + index));
+}
+
+function snapshotTransactions(edges) {
+  const byDigest = new Map();
+  for (const edge of edges) {
+    if (!edge.txDigest || byDigest.has(edge.txDigest)) continue;
+    byDigest.set(edge.txDigest, {
+      digest: edge.txDigest,
+      timestampMs: edge.timestampMs,
+      status: "snapshot",
+      balanceChanges: [],
+      objectChanges: [],
+      events: [],
+    });
+  }
+  return Array.from(byDigest.values()).sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0));
+}
+
+function restoreCaseSnapshot(snapshot, record = {}) {
+  if (snapshot?.kind !== "sui-caseflow/evidence-snapshot") throw new Error("This Walrus file is not a Sui CaseFlow snapshot.");
+  if (!isSuiAddress(snapshot.seedAddress)) throw new Error("Snapshot seed address is invalid.");
+  if (!Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.flows)) throw new Error("Snapshot graph data is incomplete.");
+
+  pushUndoState();
+  const seedAddress = snapshot.seedAddress;
+  const nodes = snapshot.nodes.map((node) => snapshotNodeToGraphNode(node, seedAddress));
+  const edges = snapshot.flows.flatMap((flow, flowIndex) => snapshotFlowToEdges(flow, flowIndex * 1000));
+  const transactions = snapshotTransactions(edges);
+
+  trace = {
+    seedAddress,
+    txCount: transactions.length,
+    hasNextPage: false,
+    restoredFromSnapshot: true,
+    restoredRecord: record,
+    transactions,
+    probableEdges: edges,
+    graphSnapshot: {
+      seedAddress,
+      generatedAt: new Date(snapshot.createdAtMs || Date.now()).toISOString(),
+      nodes,
+      edges,
+      timeline: transactions.map((tx) => ({
+        id: tx.digest,
+        txDigest: tx.digest,
+        timestampMs: tx.timestampMs,
+        status: tx.status,
+        edgeCount: edges.filter((edge) => edge.txDigest === tx.digest).length,
+      })),
+    },
+  };
+
+  selectedNodeId = seedAddress;
+  selectedFlowKey = null;
+  resetHiddenItems();
+  resetExpandedNodes();
+  resetGraphLayout();
+  dustFilterEnabled = Boolean(snapshot.filters?.dustFilterEnabled);
+  hydrateLabels();
+
+  for (const node of snapshot.nodes) {
+    if (node.position) manualPositions.set(node.id || node.address, cloneValue(node.position));
+  }
+  initializeLayoutLineage(trace.graphSnapshot);
+  viewportState = cloneValue(snapshot.viewport) || null;
+  expandedNodeIds.add(seedAddress);
+  els.addressInput.value = seedAddress;
+  render();
+}
+
+function renderSnapshotList() {
+  els.snapshotList.textContent = "";
+  if (!authSession?.address) {
+    els.snapshotList.textContent = "Connect wallet to load snapshots.";
+    return;
+  }
+  if (!mySnapshots.length) {
+    els.snapshotList.textContent = "No saved snapshots yet.";
+    return;
+  }
+
+  for (const record of mySnapshots.slice(0, 8)) {
+    const item = document.createElement("article");
+    item.className = "snapshot-item";
+    item.setAttribute("role", "button");
+    item.setAttribute("tabindex", "0");
+    item.addEventListener("click", () => restoreSnapshotRecord(record));
+    item.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      restoreSnapshotRecord(record);
+    });
+
+    const title = document.createElement("strong");
+    title.textContent = shortAddress(record.seed_address || record.quilt_id || "snapshot");
+
+    const meta = document.createElement("span");
+    meta.textContent = `${record.tx_count || 0} txs · ${record.visible_node_count || 0} nodes · ${record.visible_flow_count || 0} flows`;
+
+    const submeta = document.createElement("span");
+    submeta.textContent = `${recordDisplayTime(record)} · quilt ${recordShortQuilt(record)}`;
+
+    const hint = document.createElement("span");
+    hint.className = "snapshot-restore-hint";
+    hint.textContent = "Click to restore workspace";
+
+    item.append(title, meta, submeta, hint);
+    els.snapshotList.append(item);
+  }
+}
+
+async function loadMySnapshots() {
+  if (!authSession?.token) return;
+  try {
+    const response = await fetch("/api/snapshots", { headers: authHeaders() });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Could not load snapshots.");
+    mySnapshots = result.snapshots || [];
+    renderSnapshotList();
+  } catch (error) {
+    mySnapshots = [];
+    renderSnapshotList();
+    setAuthStatus(error.message, "error");
+  }
+}
+
+async function signInWithWallet() {
+  if (authSession?.address) {
+    setWalletDropdownOpen(true);
+    return;
+  }
+
+  els.walletButton.disabled = true;
+  setAuthStatus("Opening wallet for sign-in...");
+  try {
+    const nonceResponse = await fetch("/api/auth/nonce", { method: "POST" });
+    const nonceResult = await nonceResponse.json().catch(() => ({}));
+    if (!nonceResponse.ok) throw new Error(nonceResult.error || "Could not start wallet sign-in.");
+
+    const { signInWithSuiWallet } = await import("./src/wallet-auth.js");
+    const signed = await signInWithSuiWallet({ message: nonceResult.message });
+
+    const verifyResponse = await fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address: signed.address,
+        nonce: nonceResult.nonce,
+        bytes: signed.bytes,
+        signature: signed.signature,
+      }),
+    });
+    const verifyResult = await verifyResponse.json().catch(() => ({}));
+    if (!verifyResponse.ok) throw new Error(verifyResult.error || "Wallet sign-in failed.");
+
+    saveAuthSession(verifyResult);
+    await loadMySnapshots();
+    setWalletDropdownOpen(true);
+  } catch (error) {
+    setAuthStatus(error.message, "error");
+    setWalletDropdownOpen(true);
+  } finally {
+    els.walletButton.disabled = false;
+  }
+}
+
+function signOutWallet() {
+  clearAuthSession();
+  closeWalletDropdown();
+}
+
+function toggleWalletMenu(event) {
+  event.stopPropagation();
+  if (!authSession?.address) {
+    signInWithWallet();
+    return;
+  }
+  setWalletDropdownOpen(!walletDropdownOpen);
+}
+
+function closeWalletMenuOnOutsideClick(event) {
+  if (!walletDropdownOpen || els.walletMenu.contains(event.target)) return;
+  closeWalletDropdown();
+}
+
+function initializeAuth() {
+  authSession = storedAuthSession();
+  renderAuthState();
+  if (authSession?.token) loadMySnapshots();
 }
 
 function isSuiAddress(address) {
@@ -1537,14 +1872,85 @@ async function createEvidenceSnapshot() {
       sha256: imageHash,
     },
   };
-  const snapshotJson = `${JSON.stringify(canonicalize(snapshotCore), null, 2)}\n`;
+  const caseMemoryBase = {
+    kind: "sui-caseflow/case-memory",
+    version: 1,
+    createdAtMs,
+    seedAddress: trace.seedAddress,
+    summary: {
+      sourceTxCount: trace.txCount,
+      visibleNodeCount: visibleNodes.length,
+      visibleFlowCount: rawVisibleEdges.length,
+      visibleDisplayFlowCount: displayEdges.length,
+      txCount: txDigestsFromEdges(rawVisibleEdges).length,
+      dustFilterEnabled,
+    },
+    labels: visibleNodes
+      .filter((node) => (node.labels || []).length > 0)
+      .map((node) => ({
+        id: node.id,
+        address: node.address,
+        shortAddress: node.shortAddress,
+        labels: node.labels,
+      })),
+    keyFlows: displayEdges.map((flow) => ({
+      key: flow.key,
+      from: flow.from,
+      to: flow.to,
+      label: flow.label,
+      isBidirectional: flow.isBidirectional,
+      txCount: flow.txCount,
+      assetCount: flow.assetCount,
+      txDigests: flow.txDigests,
+    })),
+    txDigests: txDigestsFromEdges(rawVisibleEdges),
+    report: {
+      imageHash,
+    },
+    suggestedNextActions: [],
+  };
+  const caseMemoryJsonBase = `${JSON.stringify(canonicalize(caseMemoryBase), null, 2)}
+`;
+  const caseMemoryHashBase = await sha256Hex(caseMemoryJsonBase);
+
+  const snapshotWithMemory = {
+    ...snapshotCore,
+    caseMemory: {
+      kind: caseMemoryBase.kind,
+      hash: caseMemoryHashBase,
+      suggestedNextActions: [],
+    },
+  };
+  const snapshotJson = `${JSON.stringify(canonicalize(snapshotWithMemory), null, 2)}
+`;
   const snapshotHash = await sha256Hex(snapshotJson);
+  const caseMemory = {
+    ...caseMemoryBase,
+    report: {
+      ...caseMemoryBase.report,
+      snapshotHash,
+    },
+  };
+  const caseMemoryJson = `${JSON.stringify(canonicalize(caseMemory), null, 2)}
+`;
+  const caseMemoryHash = await sha256Hex(caseMemoryJson);
+  const snapshotFinal = {
+    ...snapshotCore,
+    caseMemory: {
+      kind: caseMemory.kind,
+      hash: caseMemoryHash,
+      suggestedNextActions: [],
+    },
+  };
+  const snapshotFinalJson = `${JSON.stringify(canonicalize(snapshotFinal), null, 2)}
+`;
+  const snapshotFinalHash = await sha256Hex(snapshotFinalJson);
   const metadata = {
     name: `Sui CaseFlow Snapshot ${shortAddress(trace.seedAddress)}`,
     description: `Case snapshot for seed ${trace.seedAddress}. This is a testnet artifact, not a legal attestation.`,
-    image_url: `local://caseflow/${snapshotHash}.svg`,
-    snapshot_url: `local://caseflow/${snapshotHash}.json`,
-    snapshot_hash: snapshotHash,
+    image_url: `local://caseflow/${snapshotFinalHash}.svg`,
+    snapshot_url: `local://caseflow/${snapshotFinalHash}.json`,
+    snapshot_hash: snapshotFinalHash,
     seed_address: trace.seedAddress,
     created_at_ms: createdAtMs,
   };
@@ -1552,11 +1958,15 @@ async function createEvidenceSnapshot() {
   return {
     svgText,
     svgDataUrl: svgDataUrl(svgText),
-    snapshot: { ...snapshotCore, snapshotHash, metadata },
-    snapshotJson,
-    snapshotHash,
+    snapshot: { ...snapshotFinal, snapshotHash: snapshotFinalHash, caseMemoryHash, metadata },
+    snapshotJson: snapshotFinalJson,
+    snapshotHash: snapshotFinalHash,
+    caseMemory,
+    caseMemoryJson,
+    caseMemoryHash,
     metadata,
   };
+
 }
 
 function setMintStatus(message, state = "") {
@@ -1742,10 +2152,12 @@ function buildCaseReportHtml(snapshotBundle) {
         <p class="hash">sha256:${reportEscape(snapshotHash)}</p>
         <p><strong>Image hash</strong></p>
         <p class="hash">sha256:${reportEscape(snapshot.image?.sha256 || "")}</p>
+        <p><strong>Case memory hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshotBundle.caseMemoryHash || "")}</p>
       </div>
     </section>
 
-    <p class="footer">This report is generated from the visible Sui CaseFlow graph. Hidden nodes and hidden flows are excluded. The HTML report is for human review; the JSON snapshot is the machine-readable data package.</p>
+    <p class="footer">This report is generated from the visible Sui CaseFlow graph. Hidden nodes and hidden flows are excluded. The HTML report is for human review and is backed by machine-readable snapshot and case memory artifacts.</p>
   </main>
 </body>
 </html>`;
@@ -1759,6 +2171,71 @@ function downloadCaseReport() {
 function downloadSnapshotJson() {
   if (!pendingSnapshot) return;
   downloadTextFile(snapshotDownloadName("json"), pendingSnapshot.snapshotJson, "application/json;charset=utf-8");
+}
+
+function walrusLink(label, href) {
+  const link = document.createElement("a");
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  link.textContent = label;
+  return link;
+}
+
+async function uploadCaseToWalrus() {
+  if (!pendingSnapshot) return;
+
+  if (!authSession?.token) {
+    setMintStatus("Sign in with a Sui wallet before uploading to Walrus.", "error");
+    await signInWithWallet();
+    if (!authSession?.token) return;
+  }
+
+  const shouldUpload = window.confirm(
+    "Walrus uploads are public and persistent for the selected storage period. Do not upload private notes, unpublished identity details, or sensitive personal information. Upload this case snapshot?",
+  );
+  if (!shouldUpload) return;
+
+  els.uploadWalrusButton.disabled = true;
+  setMintStatus("Uploading case package to Walrus...");
+
+  try {
+    const reportHtml = buildCaseReportHtml(pendingSnapshot);
+    const response = await fetch("/api/walrus/upload-case", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        seedAddress: pendingSnapshot.metadata.seed_address,
+        snapshotHash: pendingSnapshot.snapshotHash,
+        caseMemoryHash: pendingSnapshot.caseMemoryHash,
+        visibleNodeCount: pendingSnapshot.snapshot.visibleNodeCount,
+        visibleFlowCount: pendingSnapshot.snapshot.visibleDisplayFlowCount,
+        txCount: pendingSnapshot.snapshot.txDigests.length,
+        createdAtMs: pendingSnapshot.snapshot.createdAtMs,
+        artifacts: {
+          "report.html": reportHtml,
+          "snapshot.json": pendingSnapshot.snapshotJson,
+          "case-memory.json": pendingSnapshot.caseMemoryJson,
+        },
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Walrus upload failed.");
+
+    setMintStatus("", "success");
+    els.mintStatus.append(`Uploaded to Walrus quilt ${shortAddress(result.quiltId)} · `);
+    els.mintStatus.append(walrusLink("report", result.files?.["report.html"]?.url || result.reportUrl));
+    els.mintStatus.append(" · ");
+    els.mintStatus.append(walrusLink("snapshot", result.files?.["snapshot.json"]?.url || result.snapshotUrl));
+    els.mintStatus.append(" · ");
+    els.mintStatus.append(walrusLink("memory", result.files?.["case-memory.json"]?.url || result.caseMemoryUrl));
+    els.mintStatus.append(" · Saved to My Snapshots");
+    await loadMySnapshots();
+  } catch (error) {
+    setMintStatus(error.message, "error");
+  } finally {
+    els.uploadWalrusButton.disabled = false;
+  }
 }
 
 function mintedObjectId(result) {
@@ -1809,6 +2286,10 @@ function isEditableTarget(target) {
 }
 
 function handleKeyboardShortcut(event) {
+  if (event.key === "Escape" && walletDropdownOpen) {
+    closeWalletDropdown();
+    return;
+  }
   if (event.key.toLowerCase() !== "z") return;
   if (!event.metaKey && !event.ctrlKey) return;
   if (event.shiftKey || event.altKey || isEditableTarget(event.target)) return;
@@ -1817,6 +2298,9 @@ function handleKeyboardShortcut(event) {
   undoLastAction();
 }
 
+els.walletButton.addEventListener("click", toggleWalletMenu);
+els.signOutButton.addEventListener("click", signOutWallet);
+document.addEventListener("click", closeWalletMenuOnOutsideClick);
 els.loadSampleButton.addEventListener("click", loadTrace);
 els.traceButton.addEventListener("click", traceAddress);
 els.expandNodeButton.addEventListener("click", expandSelectedNode);
@@ -1828,12 +2312,15 @@ els.mintSnapshotButton.addEventListener("click", openMintPreview);
 els.closeMintButton.addEventListener("click", closeMintPreview);
 els.downloadReportButton.addEventListener("click", downloadCaseReport);
 els.downloadSnapshotButton.addEventListener("click", downloadSnapshotJson);
+els.uploadWalrusButton.addEventListener("click", uploadCaseToWalrus);
 els.confirmMintButton.addEventListener("click", confirmMintSnapshot);
 els.hideNodeButton.addEventListener("click", hideSelectedNode);
 els.hideFlowButton.addEventListener("click", hideSelectedFlow);
 els.flowGraph.addEventListener("wheel", zoomGraph, { passive: false });
 els.flowGraph.addEventListener("pointerdown", startGraphPan);
 document.addEventListener("keydown", handleKeyboardShortcut);
+
+initializeAuth();
 
 loadTrace().catch((error) => {
   els.caseTitle.textContent = "Trace unavailable";

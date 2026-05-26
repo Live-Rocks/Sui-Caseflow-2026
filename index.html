@@ -8,7 +8,7 @@
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <header class="app-header">
         <div class="brand">
           <div class="brand-mark">SC</div>
           <div>
@@ -16,8 +16,23 @@
             <p>Investigation workspace</p>
           </div>
         </div>
+        <div id="walletMenu" class="wallet-menu">
+          <button id="walletButton" class="secondary-button wallet-button" type="button" aria-haspopup="true" aria-expanded="false">Connect Wallet</button>
+          <div id="walletDropdown" class="wallet-dropdown" hidden>
+            <p class="eyebrow">Analyst</p>
+            <p id="authStatus" class="auth-status">Connect wallet to save Walrus snapshots.</p>
+            <div class="snapshot-list-wrap">
+              <h3>My Snapshots</h3>
+              <div id="snapshotList" class="snapshot-list">Connect wallet to load snapshots.</div>
+            </div>
+            <button id="signOutButton" type="button" class="secondary-button wallet-signout-button">Sign out</button>
+          </div>
+        </div>
+      </header>
 
-        <section class="panel input-panel">
+      <div class="main-grid">
+        <aside class="sidebar">
+          <section class="panel input-panel">
           <label for="addressInput">Seed address</label>
           <textarea id="addressInput" spellcheck="false"></textarea>
           <div class="field-row">
@@ -93,7 +108,8 @@
           <p id="flowSummary" class="address-text">Click a line in the graph to inspect every transaction inside that aggregated flow.</p>
           <div id="flowList" class="flow-list"></div>
         </section>
-      </aside>
+        </aside>
+      </div>
     </div>
 
     <dialog id="mintDialog" class="mint-dialog">
@@ -122,6 +138,7 @@
         <div class="mint-actions">
           <button id="downloadReportButton" type="button" class="secondary-button">Download Report</button>
           <button id="downloadSnapshotButton" type="button" class="secondary-button">Download JSON</button>
+          <button id="uploadWalrusButton" type="button" class="secondary-button">Upload to Walrus</button>
           <button id="confirmMintButton" type="button" class="primary-button">Mint on Sui testnet</button>
         </div>
       </form>

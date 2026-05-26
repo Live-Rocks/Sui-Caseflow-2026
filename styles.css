@@ -45,8 +45,30 @@ button:disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 320px minmax(520px, 1fr) 360px;
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-header {
+  position: relative;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: 320px minmax(520px, 1fr) 360px;
+  align-items: center;
+  gap: 0;
+  min-height: 86px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 10px 28px rgba(29, 37, 44, 0.05);
+  overflow: visible;
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 320px minmax(520px, 1fr) 360px;
   min-height: 0;
   overflow: hidden;
 }
@@ -70,13 +92,13 @@ button:disabled {
 
 .timeline {
   border-left: 1px solid var(--line);
-  height: 100vh;
   overflow: hidden;
 }
 
 .workspace {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding-top: 20px;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -330,13 +352,15 @@ select {
 
 .toolbar {
   justify-content: space-between;
-  min-height: 78px;
+  min-height: 76px;
   padding: 18px 22px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.62);
 }
 
 .toolbar-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -637,14 +661,117 @@ a.digest-text:hover {
   margin-top: 14px;
 }
 
+
+.wallet-menu {
+  position: relative;
+  justify-self: center;
+}
+
+.wallet-button {
+  min-width: 152px;
+}
+
+.wallet-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  width: min(340px, calc(100vw - 28px));
+  max-height: min(620px, calc(100vh - 106px));
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 42px rgba(29, 37, 44, 0.16);
+}
+
+.wallet-dropdown[hidden] {
+  display: none;
+}
+
+.wallet-signout-button {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.snapshot-list-wrap h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.auth-status {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.auth-status.error {
+  color: var(--red);
+}
+
+.auth-status.success {
+  color: var(--green);
+}
+
+.snapshot-list-wrap {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.snapshot-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.snapshot-item {
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.snapshot-item strong,
+.snapshot-item a {
+  display: block;
+  color: var(--ink);
+  font-weight: 850;
+  overflow-wrap: anywhere;
+}
+
+.snapshot-item:hover {
+  border-color: var(--blue);
+}
+
+.snapshot-item span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.snapshot-item .snapshot-restore-hint {
+  color: var(--blue);
+  font-weight: 800;
+}
+
 @media (max-width: 1180px) {
-  .app-shell {
+  .app-header,
+  .main-grid {
     grid-template-columns: 280px minmax(420px, 1fr);
   }
 
   .timeline {
     grid-column: 1 / -1;
-    height: auto;
     border-left: 0;
     border-top: 1px solid var(--line);
     max-height: none;
@@ -662,10 +789,23 @@ a.digest-text:hover {
     overflow: auto;
   }
 
-  .app-shell {
+  .app-shell,
+  .main-grid {
     display: block;
     height: auto;
     overflow: visible;
+  }
+
+  .app-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .wallet-menu {
+    justify-self: auto;
   }
 
   .sidebar,

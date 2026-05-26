@@ -77,3 +77,15 @@ Supported networks:
 ## Next Build Step
 
 Add address expansion so investigators can click a downstream address and pull the next layer into the same case graph.
+
+## Wallet sign-in and My Snapshots
+
+Case Snapshot uploads can be saved to a wallet-owned snapshot list. Create the Supabase table with `docs/supabase-schema.sql`, then set these server-side environment variables before running `npm run server`:
+
+```bash
+SUPABASE_URL="https://your-project.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY="your-service-role-key"
+SESSION_SECRET="a-long-random-secret"
+```
+
+`Upload to Walrus` requires signing in with a Sui wallet. `Download Report` and `Download JSON` continue to work without signing in.
