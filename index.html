@@ -21,6 +21,18 @@
           <div id="walletDropdown" class="wallet-dropdown" hidden>
             <p class="eyebrow">Analyst</p>
             <p id="authStatus" class="auth-status">Connect wallet to save Walrus snapshots.</p>
+            <div id="reputationPanel" class="reputation-panel" hidden>
+              <div class="reputation-row">
+                <div>
+                  <p class="reputation-label">Level</p>
+                  <strong id="reputationLevel">Observer</strong>
+                </div>
+                <span id="reputationXp">0 XP</span>
+              </div>
+              <div class="reputation-progress" aria-hidden="true"><span id="reputationProgress"></span></div>
+              <p id="reputationNext" class="reputation-next">0 / 50 XP to Analyst</p>
+              <p id="xpToast" class="xp-toast" hidden></p>
+            </div>
             <div class="snapshot-list-wrap">
               <h3>My Snapshots</h3>
               <div id="snapshotList" class="snapshot-list">Connect wallet to load snapshots.</div>

@@ -39,6 +39,22 @@ const supabaseUrl = process.env.SUPABASE_URL || "";
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const authNonces = new Map();
 
+const xpEventConfig = {
+  trace_case: { xp: 5, label: "Case traced" },
+  expand_node: { xp: 3, label: "Node expanded" },
+  download_report: { xp: 10, label: "Report exported" },
+  upload_walrus: { xp: 25, label: "Walrus snapshot saved" },
+  restore_snapshot: { xp: 8, label: "Snapshot restored" },
+};
+
+const reputationLevels = [
+  { level: 1, name: "Observer", threshold: 0 },
+  { level: 2, name: "Analyst", threshold: 50 },
+  { level: 3, name: "Investigator", threshold: 150 },
+  { level: 4, name: "Senior Investigator", threshold: 350 },
+  { level: 5, name: "Case Lead", threshold: 700 },
+];
+
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -115,7 +131,7 @@ function supabaseConfigured() {
   return Boolean(supabaseUrl && supabaseServiceRoleKey);
 }
 
-async function supabaseRequest(path, { method = "GET", body } = {}) {
+async function supabaseRequest(path, { method = "GET", body, prefer = "return=representation" } = {}) {
   if (!supabaseConfigured()) {
     throw new Error("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env before saving snapshots.");
   }
@@ -126,7 +142,7 @@ async function supabaseRequest(path, { method = "GET", body } = {}) {
       apikey: supabaseServiceRoleKey,
       authorization: `Bearer ${supabaseServiceRoleKey}`,
       "content-type": "application/json",
-      prefer: "return=representation",
+      prefer,
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -495,6 +511,168 @@ async function saveSnapshotRecord(payload, ownerAddress) {
   return Array.isArray(rows) ? rows[0] : rows;
 }
 
+function reputationLevelForXp(xpTotal) {
+  const xp = Math.max(0, Number(xpTotal || 0));
+  let current = reputationLevels[0];
+  for (const level of reputationLevels) {
+    if (xp >= level.threshold) current = level;
+  }
+  const next = reputationLevels.find((level) => level.threshold > xp) || null;
+  return {
+    level: current.level,
+    levelName: current.name,
+    xpTotal: xp,
+    currentThreshold: current.threshold,
+    nextLevel: next?.level || null,
+    nextLevelName: next?.name || "Max level",
+    nextThreshold: next?.threshold || current.threshold,
+    progress: next ? Math.min(1, Math.max(0, (xp - current.threshold) / (next.threshold - current.threshold))) : 1,
+  };
+}
+
+function profileResponse(row) {
+  const xpTotal = Number(row?.xp_total || 0);
+  const levelInfo = reputationLevelForXp(xpTotal);
+  return {
+    walletAddress: row?.wallet_address || "",
+    xpTotal,
+    level: levelInfo.level,
+    levelName: levelInfo.levelName,
+    nextLevel: levelInfo.nextLevel,
+    nextLevelName: levelInfo.nextLevelName,
+    currentThreshold: levelInfo.currentThreshold,
+    nextThreshold: levelInfo.nextThreshold,
+    progress: levelInfo.progress,
+    updatedAt: row?.updated_at || row?.created_at || null,
+  };
+}
+
+async function profileRowForWallet(walletAddress) {
+  const wallet = encodeURIComponent(`eq.${walletAddress}`);
+  const rows = await supabaseRequest(`analyst_profiles?wallet_address=${wallet}&select=*&limit=1`);
+  return Array.isArray(rows) ? rows[0] : null;
+}
+
+async function ensureAnalystProfile(walletAddress) {
+  const existing = await profileRowForWallet(walletAddress);
+  if (existing) return existing;
+  const rows = await supabaseRequest("analyst_profiles", {
+    method: "POST",
+    body: { wallet_address: walletAddress, xp_total: 0, level: 1 },
+  });
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+async function updateAnalystProfile(walletAddress, xpTotal) {
+  const levelInfo = reputationLevelForXp(xpTotal);
+  const wallet = encodeURIComponent(`eq.${walletAddress}`);
+  const rows = await supabaseRequest(`analyst_profiles?wallet_address=${wallet}`, {
+    method: "PATCH",
+    body: {
+      xp_total: levelInfo.xpTotal,
+      level: levelInfo.level,
+      updated_at: new Date().toISOString(),
+    },
+  });
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+async function xpEventExists(walletAddress, eventType, actionKey) {
+  const wallet = encodeURIComponent(`eq.${walletAddress}`);
+  const type = encodeURIComponent(`eq.${eventType}`);
+  const key = encodeURIComponent(`eq.${actionKey}`);
+  const rows = await supabaseRequest(`xp_events?wallet_address=${wallet}&event_type=${type}&action_key=${key}&select=id&limit=1`);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+async function handleReputationMe(req, res) {
+  let session;
+  try {
+    session = requireSession(req);
+  } catch (error) {
+    sendJson(res, 401, { error: error.message });
+    return;
+  }
+
+  if (req.method !== "GET") {
+    sendJson(res, 405, { error: "Use GET for reputation profile." });
+    return;
+  }
+
+  try {
+    const profile = await ensureAnalystProfile(session.address);
+    sendJson(res, 200, { profile: profileResponse(profile), levels: reputationLevels });
+  } catch (error) {
+    sendJson(res, 502, { error: error.message });
+  }
+}
+
+async function handleReputationEvent(req, res) {
+  let session;
+  try {
+    session = requireSession(req);
+  } catch (error) {
+    sendJson(res, 401, { error: error.message });
+    return;
+  }
+
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Use POST to record XP events." });
+    return;
+  }
+
+  try {
+    const payload = await readRequestJson(req, 64 * 1024);
+    const eventType = String(payload.eventType || "").trim();
+    const actionKey = String(payload.actionKey || "").trim();
+    const config = xpEventConfig[eventType];
+
+    if (!config) {
+      sendJson(res, 400, { error: "Unknown XP event type." });
+      return;
+    }
+    if (!actionKey || actionKey.length > 500) {
+      sendJson(res, 400, { error: "XP action key is required and must be 500 characters or fewer." });
+      return;
+    }
+
+    let profile = await ensureAnalystProfile(session.address);
+    const exists = await xpEventExists(session.address, eventType, actionKey);
+    if (exists) {
+      sendJson(res, 200, { awarded: false, profile: profileResponse(profile), event: { eventType, actionKey, xpDelta: 0, label: config.label } });
+      return;
+    }
+
+    try {
+      await supabaseRequest("xp_events", {
+        method: "POST",
+        body: {
+          wallet_address: session.address,
+          event_type: eventType,
+          xp_delta: config.xp,
+          action_key: actionKey,
+          metadata: payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {},
+        },
+      });
+    } catch (error) {
+      if (/duplicate|unique/i.test(error.message)) {
+        sendJson(res, 200, { awarded: false, profile: profileResponse(profile), event: { eventType, actionKey, xpDelta: 0, label: config.label } });
+        return;
+      }
+      throw error;
+    }
+
+    profile = await updateAnalystProfile(session.address, Number(profile.xp_total || 0) + config.xp);
+    sendJson(res, 200, {
+      awarded: true,
+      profile: profileResponse(profile),
+      event: { eventType, actionKey, xpDelta: config.xp, label: config.label },
+    });
+  } catch (error) {
+    sendJson(res, 502, { error: error.message });
+  }
+}
+
 async function handleSnapshots(req, res) {
   let session;
   try {
@@ -565,6 +743,16 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/snapshots")) {
     await handleSnapshots(req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/reputation/me")) {
+    await handleReputationMe(req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/reputation/events")) {
+    await handleReputationEvent(req, res);
     return;
   }
 

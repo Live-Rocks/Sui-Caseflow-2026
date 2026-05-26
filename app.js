@@ -16,6 +16,8 @@ let pendingSnapshot = null;
 let dustFilterEnabled = false;
 let authSession = null;
 let mySnapshots = [];
+let reputationProfile = null;
+let lastXpMessage = "";
 let walletDropdownOpen = false;
 const manualPositions = new Map();
 let currentPositions = new Map();
@@ -38,6 +40,12 @@ const els = {
   walletDropdown: document.querySelector("#walletDropdown"),
   signOutButton: document.querySelector("#signOutButton"),
   authStatus: document.querySelector("#authStatus"),
+  reputationPanel: document.querySelector("#reputationPanel"),
+  reputationLevel: document.querySelector("#reputationLevel"),
+  reputationXp: document.querySelector("#reputationXp"),
+  reputationProgress: document.querySelector("#reputationProgress"),
+  reputationNext: document.querySelector("#reputationNext"),
+  xpToast: document.querySelector("#xpToast"),
   snapshotList: document.querySelector("#snapshotList"),
   undoButton: document.querySelector("#undoButton"),
   showAllButton: document.querySelector("#showAllButton"),
@@ -115,6 +123,8 @@ function clearAuthSession() {
   authSession = null;
   localStorage.removeItem(AUTH_STORAGE_KEY);
   mySnapshots = [];
+  reputationProfile = null;
+  lastXpMessage = "";
   renderAuthState();
 }
 
@@ -137,15 +147,94 @@ function renderAuthState() {
     els.walletButton.textContent = shortAddress(authSession.address);
     els.walletButton.title = authSession.address;
     els.signOutButton.hidden = false;
-    setAuthStatus("Signed in. Walrus uploads will be saved to My Snapshots.", "success");
+    setAuthStatus("Signed in. Walrus uploads and XP are saved to your profile.", "success");
   } else {
     els.walletButton.textContent = "Connect Wallet";
     els.walletButton.removeAttribute("title");
     els.signOutButton.hidden = true;
     closeWalletDropdown();
-    setAuthStatus("Connect wallet to save Walrus snapshots.");
+    setAuthStatus("Connect wallet to save Walrus snapshots and Analyst XP.");
   }
+  renderReputation();
   renderSnapshotList();
+}
+
+function fallbackReputationProfile() {
+  return {
+    levelName: "Observer",
+    xpTotal: 0,
+    nextLevel: 2,
+    nextLevelName: "Analyst",
+    currentThreshold: 0,
+    nextThreshold: 50,
+    progress: 0,
+  };
+}
+
+function renderReputation() {
+  if (!els.reputationPanel) return;
+  if (!authSession?.address) {
+    els.reputationPanel.hidden = true;
+    if (els.xpToast) els.xpToast.hidden = true;
+    return;
+  }
+
+  const profile = reputationProfile || fallbackReputationProfile();
+  els.reputationPanel.hidden = false;
+  els.reputationLevel.textContent = profile.levelName || "Observer";
+  els.reputationXp.textContent = `${Number(profile.xpTotal || 0).toLocaleString("en")} XP`;
+
+  const percent = Math.round(Number(profile.progress || 0) * 100);
+  els.reputationProgress.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+
+  if (profile.nextLevel) {
+    const current = Number(profile.xpTotal || 0) - Number(profile.currentThreshold || 0);
+    const needed = Number(profile.nextThreshold || 0) - Number(profile.currentThreshold || 0);
+    els.reputationNext.textContent = `${Math.max(0, current).toLocaleString("en")} / ${Math.max(0, needed).toLocaleString("en")} XP to ${profile.nextLevelName}`;
+  } else {
+    els.reputationNext.textContent = "Max level reached";
+  }
+
+  if (lastXpMessage) {
+    els.xpToast.textContent = lastXpMessage;
+    els.xpToast.hidden = false;
+  } else {
+    els.xpToast.hidden = true;
+  }
+}
+
+async function loadReputation() {
+  if (!authSession?.token) return;
+  try {
+    const response = await fetch("/api/reputation/me", { headers: authHeaders() });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Could not load Analyst XP.");
+    reputationProfile = result.profile || null;
+    renderReputation();
+  } catch {
+    reputationProfile = null;
+    renderReputation();
+  }
+}
+
+async function recordXpEvent(eventType, actionKey, metadata = {}) {
+  if (!authSession?.token || !actionKey) return;
+  try {
+    const response = await fetch("/api/reputation/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ eventType, actionKey, metadata }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "XP event failed.");
+    reputationProfile = result.profile || reputationProfile;
+    if (result.awarded && result.event?.xpDelta) {
+      lastXpMessage = `+${result.event.xpDelta} XP · ${result.event.label}`;
+    }
+    renderReputation();
+  } catch {
+    // XP should never block the investigation workflow.
+  }
 }
 
 function snapshotTime(record) {
@@ -179,6 +268,11 @@ async function restoreSnapshotRecord(record) {
     if (!response.ok) throw new Error(snapshot.error || "Could not read snapshot from Walrus.");
     restoreCaseSnapshot(snapshot, record);
     setAuthStatus("Snapshot restored to workspace.", "success");
+    void recordXpEvent("restore_snapshot", record.snapshot_hash || record.id, {
+      seedAddress: record.seed_address,
+      snapshotRecordId: record.id,
+      quiltId: record.quilt_id,
+    });
     closeWalletDropdown();
   } catch (error) {
     setAuthStatus(error.message, "error");
@@ -379,7 +473,7 @@ async function signInWithWallet() {
     if (!verifyResponse.ok) throw new Error(verifyResult.error || "Wallet sign-in failed.");
 
     saveAuthSession(verifyResult);
-    await loadMySnapshots();
+    await Promise.all([loadMySnapshots(), loadReputation()]);
     setWalletDropdownOpen(true);
   } catch (error) {
     setAuthStatus(error.message, "error");
@@ -411,7 +505,10 @@ function closeWalletMenuOnOutsideClick(event) {
 function initializeAuth() {
   authSession = storedAuthSession();
   renderAuthState();
-  if (authSession?.token) loadMySnapshots();
+  if (authSession?.token) {
+    loadMySnapshots();
+    loadReputation();
+  }
 }
 
 function isSuiAddress(address) {
@@ -816,6 +913,7 @@ async function traceAddress() {
     initializeLayoutLineage(trace.graphSnapshot);
     hydrateLabels();
     render();
+    void recordXpEvent("trace_case", trace.seedAddress, { seedAddress: trace.seedAddress, limit: Number(limit) });
   } catch (error) {
     if (undoPushed) discardLastUndoState();
     els.caseTitle.textContent = "Trace failed";
@@ -853,6 +951,11 @@ async function expandSelectedNode() {
     selectedFlowKey = null;
     hydrateLabels();
     render();
+    void recordXpEvent("expand_node", `${trace.seedAddress}:${address}`, {
+      seedAddress: trace.seedAddress,
+      nodeAddress: address,
+      limit: Number(limit),
+    });
   } catch (error) {
     if (undoPushed) discardLastUndoState();
     els.flowTitle.textContent = "Expand failed";
@@ -2166,6 +2269,12 @@ function buildCaseReportHtml(snapshotBundle) {
 function downloadCaseReport() {
   if (!pendingSnapshot) return;
   downloadTextFile(snapshotDownloadName("html"), buildCaseReportHtml(pendingSnapshot), "text/html;charset=utf-8");
+  void recordXpEvent("download_report", pendingSnapshot.snapshotHash, {
+    seedAddress: pendingSnapshot.metadata.seed_address,
+    visibleNodeCount: pendingSnapshot.snapshot.visibleNodeCount,
+    visibleFlowCount: pendingSnapshot.snapshot.visibleDisplayFlowCount,
+    txCount: pendingSnapshot.snapshot.txDigests.length,
+  });
 }
 
 function downloadSnapshotJson() {
@@ -2231,6 +2340,12 @@ async function uploadCaseToWalrus() {
     els.mintStatus.append(walrusLink("memory", result.files?.["case-memory.json"]?.url || result.caseMemoryUrl));
     els.mintStatus.append(" · Saved to My Snapshots");
     await loadMySnapshots();
+    void recordXpEvent("upload_walrus", pendingSnapshot.snapshotHash || result.quiltId, {
+      seedAddress: pendingSnapshot.metadata.seed_address,
+      snapshotHash: pendingSnapshot.snapshotHash,
+      quiltId: result.quiltId,
+      txCount: pendingSnapshot.snapshot.txDigests.length,
+    });
   } catch (error) {
     setMintStatus(error.message, "error");
   } finally {

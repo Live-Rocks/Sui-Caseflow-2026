@@ -17,3 +17,27 @@ create table if not exists public.snapshot_records (
 
 create index if not exists snapshot_records_wallet_uploaded_idx
   on public.snapshot_records (wallet_address, uploaded_at desc);
+
+create table if not exists public.analyst_profiles (
+  wallet_address text primary key,
+  xp_total integer not null default 0,
+  level integer not null default 1,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.xp_events (
+  id uuid primary key default gen_random_uuid(),
+  wallet_address text not null,
+  event_type text not null,
+  xp_delta integer not null,
+  action_key text not null,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists xp_events_wallet_event_action_idx
+  on public.xp_events (wallet_address, event_type, action_key);
+
+create index if not exists xp_events_wallet_created_idx
+  on public.xp_events (wallet_address, created_at desc);

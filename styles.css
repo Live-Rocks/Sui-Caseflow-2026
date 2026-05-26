@@ -115,6 +115,7 @@ button:disabled {
 }
 
 .brand {
+  grid-column: 1;
   gap: 12px;
   min-height: 52px;
 }
@@ -664,6 +665,7 @@ a.digest-text:hover {
 
 .wallet-menu {
   position: relative;
+  grid-column: 3;
   justify-self: center;
 }
 
@@ -712,6 +714,78 @@ a.digest-text:hover {
 }
 
 .auth-status.success {
+  color: var(--green);
+}
+
+.reputation-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(247, 245, 239, 0.72);
+}
+
+.reputation-panel[hidden] {
+  display: none;
+}
+
+.reputation-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reputation-label {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.reputation-row strong {
+  display: block;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.reputation-row span {
+  color: var(--green);
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.reputation-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(29, 37, 44, 0.1);
+}
+
+.reputation-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gold);
+  transition: width 180ms ease;
+}
+
+.reputation-next,
+.xp-toast {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.3;
+}
+
+.xp-toast {
   color: var(--green);
 }
 
@@ -805,6 +879,7 @@ a.digest-text:hover {
   }
 
   .wallet-menu {
+    grid-column: auto;
     justify-self: auto;
   }
 

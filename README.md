@@ -10,14 +10,17 @@ Input any Sui address, fetch recent transaction blocks, parse balance changes, a
 
 - `docs/mvp-spec.md` - product scope, demo flow, and feature boundaries.
 - `docs/graph-model.md` - graph data structures for addresses, flows, labels, and timeline items.
+- `docs/project-memory.md` - product context, current capabilities, architecture notes, and future direction.
 - `scripts/query-sui-address.mjs` - dependency-free Sui RPC proof-of-concept.
 
 ## Quick Start
 
-Start the local app:
+Install dependencies once, then start the API server and Vite frontend:
 
 ```bash
-PORT=5174 node server.mjs
+npm install
+node server.mjs
+npm run dev
 ```
 
 Then open:
@@ -26,21 +29,15 @@ Then open:
 http://127.0.0.1:5174
 ```
 
-If port 5174 is already in use:
+Development ports:
 
-```bash
-PORT=5175 node server.mjs
-```
+- API server: `http://127.0.0.1:5173`
+- Vite frontend: `http://127.0.0.1:5174`
 
 ### Snapshot NFT dev mode
 
-The normal Node server can generate and download evidence snapshots. To enable wallet-based testnet minting, install the Vite/Sui dependencies and run the static app through Vite while the API server runs on port 5173:
+Wallet-based testnet minting is available through the Vite frontend while the API server runs on port 5173.
 
-```bash
-npm install
-node server.mjs
-npm run dev
-```
 
 Deploy `move/caseflow_snapshot` to Sui testnet, copy `.env.example` to `.env`, and set:
 
@@ -73,10 +70,6 @@ Supported networks:
 - `mainnet`
 - `testnet`
 - `devnet`
-
-## Next Build Step
-
-Add address expansion so investigators can click a downstream address and pull the next layer into the same case graph.
 
 ## Wallet sign-in and My Snapshots
 
