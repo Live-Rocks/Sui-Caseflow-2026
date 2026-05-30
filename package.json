@@ -9,9 +9,10 @@
     "check": "node --check app.js && node --check server.mjs && node --check src/mint-snapshot.js && node --check src/wallet-auth.js"
   },
   "dependencies": {
+    "@mysten-incubation/memwal": "^0.0.3",
+    "@mysten/seal": "^1.1.3",
     "@mysten/sui": "^1.38.0",
     "@mysten/wallet-standard": "^0.17.0",
     "vite": "^6.3.0"
-  },
-  "devDependencies": {}
+  }
 }

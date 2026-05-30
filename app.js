@@ -3,8 +3,9 @@ const EXPLORER_BASE_URL = "https://suivision.xyz";
 const LABELS = ["hacker", "intermediate", "bridge", "exchange_suspect", "known_entity", "watch"];
 const MAX_UNDO_STEPS = 20;
 const SUI_COIN_TYPE = "0x2::sui::SUI";
-const DUST_SUI_THRESHOLD = 5_000_000n;
+const DUST_SUI_THRESHOLD = 20_000_000n;
 const AUTH_STORAGE_KEY = "sui-caseflow-auth-session";
+const WALRUS_AGGREGATOR_URL = "https://aggregator.walrus-testnet.walrus.space";
 
 let trace = null;
 let selectedNodeId = SAMPLE_ADDRESS;
@@ -13,12 +14,19 @@ let dragState = null;
 let panState = null;
 let viewportState = null;
 let pendingSnapshot = null;
+let restoredSuggestedActions = [];
+let restoredAiNotes = null;
 let dustFilterEnabled = false;
 let authSession = null;
 let mySnapshots = [];
 let reputationProfile = null;
 let lastXpMessage = "";
 let walletDropdownOpen = false;
+let memwalAssistantOpen = false;
+let memwalRecallResults = [];
+let currentWalrusCaseId = "";
+let currentSnapshotUrl = "";
+let currentSnapshotHash = "";
 const manualPositions = new Map();
 let currentPositions = new Map();
 const labelState = new Map();
@@ -47,6 +55,8 @@ const els = {
   reputationNext: document.querySelector("#reputationNext"),
   xpToast: document.querySelector("#xpToast"),
   snapshotList: document.querySelector("#snapshotList"),
+  walrusRestoreInput: document.querySelector("#walrusRestoreInput"),
+  walrusRestoreButton: document.querySelector("#walrusRestoreButton"),
   undoButton: document.querySelector("#undoButton"),
   showAllButton: document.querySelector("#showAllButton"),
   dustFilterButton: document.querySelector("#dustFilterButton"),
@@ -74,10 +84,22 @@ const els = {
   snapshotStats: document.querySelector("#snapshotStats"),
   snapshotHash: document.querySelector("#snapshotHash"),
   mintStatus: document.querySelector("#mintStatus"),
+  generateAiNotesButton: document.querySelector("#generateAiNotesButton"),
   downloadReportButton: document.querySelector("#downloadReportButton"),
   downloadSnapshotButton: document.querySelector("#downloadSnapshotButton"),
   uploadWalrusButton: document.querySelector("#uploadWalrusButton"),
   confirmMintButton: document.querySelector("#confirmMintButton"),
+  memwalAssistant: document.querySelector("#memwalAssistant"),
+  memwalAssistantToggle: document.querySelector("#memwalAssistantToggle"),
+  memwalAssistantIcon: document.querySelector("#memwalAssistantIcon"),
+  memwalAssistantBody: document.querySelector("#memwalAssistantBody"),
+  memwalCurrentSummary: document.querySelector("#memwalCurrentSummary"),
+  memwalCurrentRoot: document.querySelector("#memwalCurrentRoot"),
+  memwalCurrentStatus: document.querySelector("#memwalCurrentStatus"),
+  memwalCurrentNext: document.querySelector("#memwalCurrentNext"),
+  memwalRecallButton: document.querySelector("#memwalRecallButton"),
+  memwalRecallStatus: document.querySelector("#memwalRecallStatus"),
+  memwalRecallResults: document.querySelector("#memwalRecallResults"),
 };
 
 function shortAddress(address) {
@@ -171,6 +193,208 @@ function fallbackReputationProfile() {
   };
 }
 
+
+function setCurrentWalrusRefs(record = {}) {
+  currentWalrusCaseId = record.quilt_id || record.quiltId || "";
+  currentSnapshotUrl = snapshotUrlForRecord(record) || record.snapshot_url || record.snapshotUrl || "";
+  currentSnapshotHash = record.snapshot_hash || record.snapshotHash || currentSnapshotHash || "";
+}
+
+function clearCurrentWalrusRefs() {
+  currentWalrusCaseId = "";
+  currentSnapshotUrl = "";
+  currentSnapshotHash = "";
+}
+
+function memwalAssistantStatus(message, state = "") {
+  if (!els.memwalRecallStatus) return;
+  els.memwalRecallStatus.textContent = message;
+  els.memwalRecallStatus.className = `memwal-recall-status ${state}`.trim();
+}
+
+function setMemwalAssistantOpen(open) {
+  memwalAssistantOpen = Boolean(open);
+  if (!els.memwalAssistant) return;
+  els.memwalAssistant.classList.toggle("is-collapsed", !memwalAssistantOpen);
+  els.memwalAssistantToggle.setAttribute("aria-expanded", String(memwalAssistantOpen));
+  els.memwalAssistantBody.hidden = !memwalAssistantOpen;
+  els.memwalAssistantIcon.textContent = memwalAssistantOpen ? "▾" : "▴";
+  if (memwalAssistantOpen) renderMemwalAssistant();
+}
+
+function currentMemwalStatusLabel() {
+  const record = trace?.restoredRecord || null;
+  const status = record?.memwal_status || "";
+  if (status === "saved") return "Saved to MemWal";
+  if (status === "queued") return "MemWal queued";
+  if (status === "failed") return "MemWal save failed";
+  if (status === "skipped") return "MemWal not configured";
+  if (currentWalrusCaseId) return "Walrus case available";
+  return "Memory query ready";
+}
+
+function recallBoundaryLabel(boundary) {
+  return `${boundary.address_short || shortAddress(boundary.address || "boundary")} (${boundary.boundary_type || "boundary"})`;
+}
+
+function renderMemwalAssistant() {
+  if (!els.memwalAssistant) return;
+  const hasCase = Boolean(trace?.graphSnapshot);
+  els.memwalRecallButton.disabled = !hasCase || !authSession?.token;
+  if (!hasCase) {
+    els.memwalCurrentSummary.textContent = "Start a trace or restore a snapshot to recall related memories.";
+    els.memwalCurrentRoot.textContent = "No case";
+    els.memwalCurrentStatus.textContent = "No memory card";
+    els.memwalCurrentNext.textContent = "None";
+    if (!els.memwalRecallStatus.textContent) memwalAssistantStatus("Start a trace or restore a snapshot to recall related memories.");
+    renderMemwalRecallResults();
+    return;
+  }
+
+  const actions = currentMemoryAgentActions(trace.graphSnapshot);
+  const topAction = actions.find((action) => action.priority === "high") || actions[0] || null;
+  els.memwalCurrentRoot.textContent = shortAddress(trace.seedAddress || trace.graphSnapshot.seedAddress || "");
+  els.memwalCurrentStatus.textContent = currentMemwalStatusLabel();
+  els.memwalCurrentNext.textContent = topAction?.title || "Review current investigation leads";
+  els.memwalCurrentSummary.textContent = "Current case memory is generated from this workspace and used as recall query material. Recalled memories come from MemWal.";
+
+  if (!authSession?.token && !els.memwalRecallStatus.textContent) {
+    memwalAssistantStatus("Connect Wallet to recall your MemWal memories.");
+  } else if (!els.memwalRecallStatus.textContent) {
+    memwalAssistantStatus("Ready to recall related memories.");
+  }
+  renderMemwalRecallResults();
+}
+
+function confidenceLabel(score) {
+  return score >= 70 ? "High match" : "Medium match";
+}
+
+function restoreRecallResult(result) {
+  const source = result.snapshotUrl || result.walrusCaseId || "";
+  if (!source) return;
+  els.walrusRestoreInput.value = source;
+  void restoreWalrusInput();
+}
+
+function renderMemwalRecallResults() {
+  if (!els.memwalRecallResults) return;
+  els.memwalRecallResults.innerHTML = "";
+  if (!memwalRecallResults.length) return;
+
+  for (const result of memwalRecallResults) {
+    const item = document.createElement("article");
+    item.className = "memwal-result-card";
+
+    const title = document.createElement("strong");
+    title.textContent = result.rootAddressShort || result.walrusCaseIdShort || "Related memory";
+
+    const confidence = document.createElement("span");
+    confidence.className = "memwal-confidence";
+    confidence.textContent = result.confidence || confidenceLabel(Number(result.score || 0));
+
+    const summary = document.createElement("p");
+    summary.textContent = result.summary || "No summary available.";
+
+    const reasons = document.createElement("p");
+    reasons.className = "memwal-match-reasons";
+    reasons.textContent = (result.matchReasons || []).length ? `Match: ${result.matchReasons.join(" · ")}` : "Match: related memory";
+
+    const next = document.createElement("p");
+    next.className = "memwal-next-action";
+    next.textContent = result.nextBestAction ? `Next: ${result.nextBestAction}` : "Next: review restored case memory";
+
+    const actions = document.createElement("div");
+    actions.className = "memwal-result-actions";
+
+    if (result.walrusCaseId || result.snapshotUrl) {
+      const restoreButton = document.createElement("button");
+      restoreButton.type = "button";
+      restoreButton.textContent = "Restore";
+      restoreButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        restoreRecallResult(result);
+      });
+      actions.append(restoreButton);
+    }
+
+    const copyCaseButton = document.createElement("button");
+    copyCaseButton.type = "button";
+    copyCaseButton.textContent = "Copy Case ID";
+    copyCaseButton.disabled = !result.walrusCaseId;
+    copyCaseButton.addEventListener("click", (event) => {
+      void copySnapshotValue(event, result.walrusCaseId, "Walrus Case ID copied.");
+    });
+
+    const copySnapshotButton = document.createElement("button");
+    copySnapshotButton.type = "button";
+    copySnapshotButton.textContent = "Copy Snapshot URL";
+    copySnapshotButton.disabled = !result.snapshotUrl;
+    copySnapshotButton.addEventListener("click", (event) => {
+      void copySnapshotValue(event, result.snapshotUrl, "Snapshot URL copied.");
+    });
+
+    actions.append(copyCaseButton, copySnapshotButton);
+    item.append(title, confidence, summary, reasons, next, actions);
+    els.memwalRecallResults.append(item);
+  }
+}
+
+function compactMemwalQuery(bundle) {
+  const memory = bundle.memwalMemory || {};
+  return {
+    searchText: memory.search_text || memory.summary || "",
+    rootAddress: memory.root_address || bundle.snapshot?.seedAddress || trace?.seedAddress || "",
+    currentWalrusCaseId,
+    currentSnapshotHash: currentSnapshotHash || bundle.snapshotHash || "",
+    labels: memory.metadata?.labels || [],
+    boundaryTypes: memory.metadata?.boundary_types || [],
+    patternTypes: memory.metadata?.pattern_types || [],
+    nextActionType: memory.metadata?.next_action_type || "",
+    nextBestAction: memory.next_best_action || null,
+    traceBoundaries: memory.trace_boundaries || [],
+  };
+}
+
+async function recallRelatedCases() {
+  if (!trace?.graphSnapshot) {
+    memwalAssistantStatus("Start a trace or restore a snapshot to recall related memories.", "error");
+    renderMemwalAssistant();
+    return;
+  }
+  if (!authSession?.token) {
+    memwalAssistantStatus("Connect Wallet to recall your MemWal memories.", "error");
+    renderMemwalAssistant();
+    return;
+  }
+
+  els.memwalRecallButton.disabled = true;
+  memwalAssistantStatus("Building current case memory and recalling related cases...");
+  try {
+    const bundle = await createEvidenceSnapshot();
+    const response = await fetch("/api/memwal/recall", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify(compactMemwalQuery(bundle)),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "MemWal recall failed.");
+    memwalRecallResults = result.results || [];
+    if (result.status === "skipped") {
+      memwalAssistantStatus("MemWal is not configured on this server.", "error");
+    } else if (!memwalRecallResults.length) {
+      memwalAssistantStatus(result.message || "No other related memories found yet.");
+    } else {
+      memwalAssistantStatus(`Found ${memwalRecallResults.length} related memor${memwalRecallResults.length === 1 ? "y" : "ies"}.`, "success");
+    }
+    renderMemwalAssistant();
+  } catch (error) {
+    memwalAssistantStatus(error.message || "MemWal recall failed.", "error");
+  } finally {
+    els.memwalRecallButton.disabled = !trace?.graphSnapshot || !authSession?.token;
+  }
+}
+
 function renderReputation() {
   if (!els.reputationPanel) return;
   if (!authSession?.address) {
@@ -188,9 +412,9 @@ function renderReputation() {
   els.reputationProgress.style.width = `${Math.max(0, Math.min(100, percent))}%`;
 
   if (profile.nextLevel) {
-    const current = Number(profile.xpTotal || 0) - Number(profile.currentThreshold || 0);
-    const needed = Number(profile.nextThreshold || 0) - Number(profile.currentThreshold || 0);
-    els.reputationNext.textContent = `${Math.max(0, current).toLocaleString("en")} / ${Math.max(0, needed).toLocaleString("en")} XP to ${profile.nextLevelName}`;
+    const xpTotal = Math.max(0, Number(profile.xpTotal || 0));
+    const nextThreshold = Math.max(0, Number(profile.nextThreshold || 0));
+    els.reputationNext.textContent = `${xpTotal.toLocaleString("en")} / ${nextThreshold.toLocaleString("en")} XP to ${profile.nextLevelName}`;
   } else {
     els.reputationNext.textContent = "Max level reached";
   }
@@ -249,24 +473,105 @@ function recordDisplayTime(record) {
 }
 
 function recordShortQuilt(record) {
-  return record.quilt_id ? shortAddress(record.quilt_id) : "No quilt";
+  return record.quilt_id ? shortAddress(record.quilt_id) : "No Walrus ID";
+}
+
+function walrusSnapshotUrlFromQuiltId(quiltId) {
+  if (!quiltId) return "";
+  return `${WALRUS_AGGREGATOR_URL}/v1/blobs/by-quilt-id/${encodeURIComponent(quiltId)}/snapshot.json`;
+}
+
+function snapshotUrlForRecord(record) {
+  return record?.snapshot_url || walrusSnapshotUrlFromQuiltId(record?.quilt_id || "");
 }
 
 function stopSnapshotClick(event) {
   event.stopPropagation();
 }
 
+async function copyTextToClipboard(value, successMessage) {
+  const text = String(value || "").trim();
+  if (!text) throw new Error("Nothing to copy.");
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  setAuthStatus(successMessage, "success");
+}
+
+async function copySnapshotValue(event, value, successMessage) {
+  stopSnapshotClick(event);
+  try {
+    await copyTextToClipboard(value, successMessage);
+  } catch (error) {
+    setAuthStatus(error.message, "error");
+  }
+}
+
+function walrusReadQueryForInput(input) {
+  const value = String(input || "").trim();
+  if (!value) throw new Error("Paste a Walrus Case ID or snapshot URL first.");
+  if (/^https?:\/\//i.test(value)) return `url=${encodeURIComponent(value)}`;
+  return `quiltId=${encodeURIComponent(value)}`;
+}
+
+async function restoreWalrusInput() {
+  const value = els.walrusRestoreInput.value.trim();
+  let query;
+  try {
+    query = walrusReadQueryForInput(value);
+  } catch (error) {
+    setAuthStatus(error.message, "error");
+    return;
+  }
+
+  const confirmed = window.confirm("Restore this Walrus snapshot to the workspace? Current graph will be replaced.");
+  if (!confirmed) return;
+
+  els.walrusRestoreButton.disabled = true;
+  setAuthStatus("Restoring Walrus snapshot...");
+  try {
+    const response = await fetch(`/api/walrus/read-json?${query}`);
+    const snapshot = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(snapshot.error || "Could not read snapshot from Walrus.");
+    const record = /^https?:\/\//i.test(value)
+      ? { snapshot_url: value }
+      : { quilt_id: value, snapshot_url: walrusSnapshotUrlFromQuiltId(value) };
+    restoreCaseSnapshot(snapshot, record);
+    setAuthStatus("Walrus snapshot restored to workspace.", "success");
+    els.walrusRestoreInput.value = "";
+    closeWalletDropdown();
+  } catch (error) {
+    setAuthStatus(error.message, "error");
+  } finally {
+    els.walrusRestoreButton.disabled = false;
+  }
+}
+
 async function restoreSnapshotRecord(record) {
-  if (!record?.snapshot_url) return;
+  const snapshotUrl = snapshotUrlForRecord(record);
+  if (!snapshotUrl) {
+    setAuthStatus("Snapshot URL unavailable.", "error");
+    return;
+  }
   const confirmed = window.confirm("Restore this snapshot to the workspace? Current unsaved graph state will be replaced.");
   if (!confirmed) return;
 
   setAuthStatus("Restoring snapshot from Walrus...");
   try {
-    const response = await fetch(`/api/walrus/read-json?url=${encodeURIComponent(record.snapshot_url)}`);
+    const response = await fetch(`/api/walrus/read-json?url=${encodeURIComponent(snapshotUrl)}`);
     const snapshot = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(snapshot.error || "Could not read snapshot from Walrus.");
-    restoreCaseSnapshot(snapshot, record);
+    restoreCaseSnapshot(snapshot, { ...record, snapshot_url: snapshotUrl });
     setAuthStatus("Snapshot restored to workspace.", "success");
     void recordXpEvent("restore_snapshot", record.snapshot_hash || record.id, {
       seedAddress: record.seed_address,
@@ -371,6 +676,20 @@ function restoreCaseSnapshot(snapshot, record = {}) {
 
   selectedNodeId = seedAddress;
   selectedFlowKey = null;
+  restoredSuggestedActions = Array.isArray(snapshot.caseMemory?.suggestedNextActions)
+    ? cloneValue(snapshot.caseMemory.suggestedNextActions)
+    : [];
+  restoredAiNotes = snapshot.aiNotes && typeof snapshot.aiNotes === "object"
+    ? cloneValue(snapshot.aiNotes)
+    : null;
+  setCurrentWalrusRefs({
+    ...record,
+    snapshotHash: snapshot.snapshotHash || snapshot.metadata?.snapshot_hash || snapshot.aiNotes?.source_artifacts?.input_snapshot_hash || "",
+  });
+  console.debug("[CaseFlow] Restored AI notes", {
+    generatedBy: restoredAiNotes?.generated_by || "rule_fallback",
+    aiNotesHash: snapshot.aiNotesHash || "",
+  });
   resetHiddenItems();
   resetExpandedNodes();
   resetGraphLayout();
@@ -385,6 +704,7 @@ function restoreCaseSnapshot(snapshot, record = {}) {
   expandedNodeIds.add(seedAddress);
   els.addressInput.value = seedAddress;
   render();
+  renderMemwalAssistant();
 }
 
 function renderSnapshotList() {
@@ -405,6 +725,7 @@ function renderSnapshotList() {
     item.setAttribute("tabindex", "0");
     item.addEventListener("click", () => restoreSnapshotRecord(record));
     item.addEventListener("keydown", (event) => {
+      if (event.target?.closest?.("button")) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       restoreSnapshotRecord(record);
@@ -417,13 +738,36 @@ function renderSnapshotList() {
     meta.textContent = `${record.tx_count || 0} txs · ${record.visible_node_count || 0} nodes · ${record.visible_flow_count || 0} flows`;
 
     const submeta = document.createElement("span");
-    submeta.textContent = `${recordDisplayTime(record)} · quilt ${recordShortQuilt(record)}`;
+    submeta.textContent = `${recordDisplayTime(record)} · Walrus Case ${recordShortQuilt(record)}`;
 
     const hint = document.createElement("span");
     hint.className = "snapshot-restore-hint";
     hint.textContent = "Click to restore workspace";
 
-    item.append(title, meta, submeta, hint);
+    const actions = document.createElement("div");
+    actions.className = "snapshot-actions";
+
+    const copyCaseIdButton = document.createElement("button");
+    copyCaseIdButton.type = "button";
+    copyCaseIdButton.textContent = "Copy Walrus Case ID";
+    copyCaseIdButton.disabled = !record.quilt_id;
+    copyCaseIdButton.title = "Used to restore this case from Walrus";
+    copyCaseIdButton.addEventListener("click", (event) => {
+      void copySnapshotValue(event, record.quilt_id, "Walrus Case ID copied.");
+    });
+
+    const snapshotUrl = snapshotUrlForRecord(record);
+    const copySnapshotUrlButton = document.createElement("button");
+    copySnapshotUrlButton.type = "button";
+    copySnapshotUrlButton.textContent = snapshotUrl ? "Copy Snapshot URL" : "Snapshot URL unavailable";
+    copySnapshotUrlButton.disabled = !snapshotUrl;
+    copySnapshotUrlButton.title = "Direct URL for snapshot.json";
+    copySnapshotUrlButton.addEventListener("click", (event) => {
+      void copySnapshotValue(event, snapshotUrl, "Snapshot URL copied.");
+    });
+
+    actions.append(copyCaseIdButton, copySnapshotUrlButton);
+    item.append(title, meta, submeta, hint, actions);
     els.snapshotList.append(item);
   }
 }
@@ -797,6 +1141,19 @@ function cloneValue(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function clearRestoredAiNotes() {
+  restoredAiNotes = null;
+}
+
+function invalidateCaseMemoryRefs() {
+  restoredSuggestedActions = [];
+  clearRestoredAiNotes();
+  clearCurrentWalrusRefs();
+  memwalRecallResults = [];
+  renderMemwalAssistant();
+}
+
+
 function mapToEntries(map) {
   return Array.from(map.entries()).map(([key, value]) => [key, cloneValue(value)]);
 }
@@ -815,6 +1172,11 @@ function captureState() {
     selectedFlowKey,
     viewportState: cloneValue(viewportState),
     dustFilterEnabled,
+    restoredSuggestedActions: cloneValue(restoredSuggestedActions),
+    restoredAiNotes: cloneValue(restoredAiNotes),
+    currentWalrusCaseId,
+    currentSnapshotUrl,
+    currentSnapshotHash,
     manualPositions: mapToEntries(manualPositions),
     labelState: mapToEntries(labelState),
     hiddenNodeIds: Array.from(hiddenNodeIds),
@@ -831,6 +1193,11 @@ function restoreState(snapshot) {
   selectedFlowKey = snapshot.selectedFlowKey;
   viewportState = cloneValue(snapshot.viewportState);
   dustFilterEnabled = Boolean(snapshot.dustFilterEnabled);
+  restoredSuggestedActions = cloneValue(snapshot.restoredSuggestedActions || []);
+  restoredAiNotes = cloneValue(snapshot.restoredAiNotes || null);
+  currentWalrusCaseId = snapshot.currentWalrusCaseId || "";
+  currentSnapshotUrl = snapshot.currentSnapshotUrl || "";
+  currentSnapshotHash = snapshot.currentSnapshotHash || "";
 
   restoreMap(manualPositions, snapshot.manualPositions);
   restoreMap(labelState, snapshot.labelState);
@@ -879,6 +1246,7 @@ async function loadTrace() {
   trace = await response.json();
   selectedNodeId = trace.seedAddress;
   selectedFlowKey = null;
+  invalidateCaseMemoryRefs();
   resetHiddenItems();
   resetGraphLayout();
   resetGraphViewport();
@@ -905,6 +1273,7 @@ async function traceAddress() {
     trace = payload;
     selectedNodeId = trace.seedAddress;
     selectedFlowKey = null;
+    invalidateCaseMemoryRefs();
     resetHiddenItems();
     resetGraphLayout();
     resetGraphViewport();
@@ -945,6 +1314,7 @@ async function expandSelectedNode() {
     if (!response.ok) throw new Error(payload.error || "Expand failed");
 
     mergeTrace(payload);
+    invalidateCaseMemoryRefs();
     applyExpansionLineage(address, payload);
     expandedNodeIds.add(address);
     selectedNodeId = address;
@@ -1269,6 +1639,7 @@ function render() {
   renderDustFilterButton();
   updateUndoButton();
   els.mintSnapshotButton.disabled = false;
+  if (memwalAssistantOpen) renderMemwalAssistant();
 }
 
 function renderDustFilterButton() {
@@ -1789,6 +2160,7 @@ function selectFlow(flowKey) {
 function hideSelectedNode() {
   if (!trace || selectedNodeId === trace.graphSnapshot.seedAddress) return;
   pushUndoState();
+  invalidateCaseMemoryRefs();
   hiddenNodeIds.add(selectedNodeId);
   selectedNodeId = trace.graphSnapshot.seedAddress;
   selectedFlowKey = null;
@@ -1802,6 +2174,7 @@ function hideSelectedFlow() {
   if (!edge) return;
 
   pushUndoState();
+  invalidateCaseMemoryRefs();
   for (const item of edge.items) {
     hiddenEdgeIds.add(edgeId(item));
   }
@@ -1813,6 +2186,7 @@ function hideSelectedFlow() {
 function hideSingleEdge(edge) {
   if (!trace) return;
   pushUndoState();
+  invalidateCaseMemoryRefs();
   hiddenEdgeIds.add(edgeId(edge));
   render();
 }
@@ -1820,6 +2194,7 @@ function hideSingleEdge(edge) {
 function showAllHiddenItems() {
   if (!trace || (hiddenNodeIds.size === 0 && hiddenEdgeIds.size === 0)) return;
   pushUndoState();
+  invalidateCaseMemoryRefs();
   resetHiddenItems();
   selectedFlowKey = null;
   render();
@@ -1834,6 +2209,7 @@ function selectedFlowIsVisible() {
 function toggleDustFilter() {
   if (!trace) return;
   pushUndoState();
+  invalidateCaseMemoryRefs();
   dustFilterEnabled = !dustFilterEnabled;
   if (selectedFlowKey && !selectedFlowIsVisible()) {
     selectedFlowKey = null;
@@ -1844,11 +2220,273 @@ function toggleDustFilter() {
 function toggleLabel(nodeId, label) {
   if (!trace) return;
   pushUndoState();
+  invalidateCaseMemoryRefs();
   const labels = new Set(labelState.get(nodeId) || []);
   if (labels.has(label)) labels.delete(label);
   else labels.add(label);
   labelState.set(nodeId, Array.from(labels));
   render();
+}
+
+
+function parseDisplayMagnitude(label) {
+  const text = String(label || "").replace(/,/g, "");
+  const match = text.match(/([0-9]+(?:\.[0-9]+)?)\s*([KMB])?/i);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  const suffix = (match[2] || "").toUpperCase();
+  if (suffix === "B") return value * 1_000_000_000;
+  if (suffix === "M") return value * 1_000_000;
+  if (suffix === "K") return value * 1_000;
+  return value;
+}
+
+function memoryFlowLabel(flow) {
+  if (flow?.label) return flow.label;
+  try {
+    return edgeLabel(flow);
+  } catch {
+    return flow?.assetCount > 1 ? `${flow.assetCount} assets` : "flow";
+  }
+}
+
+function memoryFlowMagnitude(flow) {
+  return parseDisplayMagnitude(memoryFlowLabel(flow));
+}
+
+function actionPriorityRank(priority) {
+  return { high: 0, medium: 1, low: 2 }[priority] ?? 3;
+}
+
+function actionTypeRank(type) {
+  return {
+    stop_boundary: 0,
+    expand_node: 1,
+    inspect_bridge: 2,
+    inspect_flow: 3,
+    verify_entity: 4,
+    keep_filter: 5,
+    export_report: 6,
+  }[type] ?? 7;
+}
+
+function memoryAction(id, type, priority, title, rationale, extra = {}) {
+  return { id, type, priority, title, rationale, ...extra };
+}
+
+function memoryActionType(action) {
+  return action?.action_type || action?.type || "";
+}
+
+function isBoundaryAction(action) {
+  return ["stop_boundary", "verify_entity"].includes(memoryActionType(action));
+}
+
+function nodeHasAnyLabel(node, labels) {
+  const activeLabels = nodeLabels(node);
+  return labels.some((label) => activeLabels.includes(label));
+}
+
+function nodeTraceDepth(nodeId, graph) {
+  if (!nodeId || nodeId === graph.seedAddress) return 0;
+
+  const visited = new Set([nodeId]);
+  let current = nodeId;
+  let depth = 0;
+  while (nodeParentById.has(current)) {
+    const parentId = nodeParentById.get(current);
+    if (!parentId || visited.has(parentId)) break;
+    depth += 1;
+    if (parentId === graph.seedAddress) return depth;
+    visited.add(parentId);
+    current = parentId;
+  }
+
+  const layoutDepth = nodeDepthById.get(nodeId);
+  if (Number.isFinite(layoutDepth) && layoutDepth !== 0) return Math.abs(layoutDepth);
+
+  for (const edge of visibleEdges(graph)) {
+    if ((edge.from === graph.seedAddress && edge.to === nodeId) || (edge.to === graph.seedAddress && edge.from === nodeId)) return 1;
+  }
+
+  return Number.POSITIVE_INFINITY;
+}
+
+function isTerminalEntityNode(node) {
+  return nodeHasAnyLabel(node, ["exchange_suspect", "known_entity", "known_exchange"]);
+}
+
+function isBridgeLikeNode(node) {
+  return String(node?.id || "").startsWith("protocol:") || nodeHasAnyLabel(node, ["bridge", "bridge_contract"]);
+}
+
+function canSuggestExpandNode({ node, flow, value, graph }) {
+  if (!node || !isSuiAddress(node.id) || node.id === graph.seedAddress || expandedNodeIds.has(node.id)) return false;
+  if (isTerminalEntityNode(node) || isBridgeLikeNode(node)) return false;
+  const depth = nodeTraceDepth(node.id, graph);
+  if (Number.isFinite(depth) && depth > 2) return false;
+
+  const labels = nodeLabels(node).filter((label) => label !== "seed");
+  if (labels.length === 0 || labels.includes("intermediate")) return true;
+  if (labels.includes("watch")) return value >= 1_000 || (flow.txCount || 0) >= 2 || depth <= 1;
+  return false;
+}
+
+function memoryAgentActionsForGraph(graph, displayEdges = null, visibleNodes = null) {
+  if (!graph) return [];
+  const nodes = visibleNodes || visibleGraphNodes(graph);
+  const edges = displayEdges || visualDisplayEdges(withDisplayLanes(aggregateDisplayEdges(visibleEdges(graph))));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const actions = new Map();
+
+  function add(action) {
+    if (!action?.id || actions.has(action.id)) return;
+    actions.set(action.id, action);
+  }
+
+  for (const node of nodes) {
+    const labels = nodeLabels(node);
+    const entityLabel = labels.find((label) => ["exchange_suspect", "known_entity", "known_exchange"].includes(label));
+    if (entityLabel) {
+      add(memoryAction(
+        `boundary:${node.id}:${entityLabel}`,
+        "stop_boundary",
+        "high",
+        `Stop at ${shortAddress(node.address || node.id)}`,
+        `This node is analyst-labeled ${entityLabel}. Treat it as an investigation boundary and verify context before following unrelated downstream activity.`,
+        { targetNodeId: node.id },
+      ));
+      add(memoryAction(
+        `verify:${node.id}:${entityLabel}`,
+        "verify_entity",
+        "medium",
+        `Verify ${shortAddress(node.address || node.id)}`,
+        `Cross-check the account activity and entity context before relying on the analyst-provided ${entityLabel} label.`,
+        { targetNodeId: node.id },
+      ));
+    }
+
+    const bridgeLabel = labels.find((label) => ["bridge", "bridge_contract"].includes(label));
+    if (bridgeLabel) {
+      add(memoryAction(
+        `inspect-bridge:${node.id}:${bridgeLabel}`,
+        "inspect_bridge",
+        "medium",
+        `Inspect bridge ${shortAddress(node.address || node.id)}`,
+        "This bridge-labeled node is a transition point. Check bridge event details, amount, timestamp, and continuation evidence instead of expanding service-side noise by default.",
+        { targetNodeId: node.id },
+      ));
+    }
+  }
+
+  const inspectFlow = edges.find((flow) => flow.isBidirectional || flow.from.startsWith("protocol:") || flow.to.startsWith("protocol:") || /directions|assets/i.test(memoryFlowLabel(flow)));
+  if (inspectFlow) {
+    const bridgeFlow = inspectFlow.from.startsWith("protocol:bridge") || inspectFlow.to.startsWith("protocol:bridge");
+    add(memoryAction(
+      `inspect:${inspectFlow.key}`,
+      bridgeFlow ? "inspect_bridge" : "inspect_flow",
+      "medium",
+      bridgeFlow ? "Inspect bridge flow" : "Inspect protocol or bidirectional flow",
+      bridgeFlow
+        ? "This flow may represent a cross-chain transition. Review bridge event details, amount, timestamp, and counterparties before extending the graph."
+        : "This aggregated flow may contain multiple assets, directions, or protocol interactions. Review the transaction list before drawing conclusions.",
+      { targetFlowKey: inspectFlow.key, txDigests: inspectFlow.txDigests || [] },
+    ));
+  }
+
+  const highValueFlows = [...edges]
+    .map((flow) => ({ flow, value: memoryFlowMagnitude(flow) }))
+    .filter(({ flow, value }) => value >= 1_000 || flow.txCount >= 2)
+    .sort((a, b) => b.value - a.value || (b.flow.txCount || 0) - (a.flow.txCount || 0));
+
+  for (const { flow, value } of highValueFlows) {
+    const candidates = [flow.to, flow.from]
+      .map((nodeId) => nodeById.get(nodeId))
+      .filter((node) => canSuggestExpandNode({ node, flow, value, graph }));
+    const targetNode = candidates[0];
+    if (!targetNode) continue;
+    add(memoryAction(
+      `expand:${targetNode.id}`,
+      "expand_node",
+      "high",
+      `Expand ${shortAddress(targetNode.id)}`,
+      `This visible flow carries ${memoryFlowLabel(flow)} and the address remains a plausible continuation point within the current trace depth.`,
+      { targetNodeId: targetNode.id, targetFlowKey: flow.key, txDigests: flow.txDigests || [] },
+    ));
+    if (Array.from(actions.values()).filter((action) => memoryActionType(action) === "expand_node").length >= 2) break;
+  }
+
+  if (!dustFilterEnabled && (nodes.length >= 12 || edges.length >= 20)) {
+    add(memoryAction(
+      "filter:dust",
+      "keep_filter",
+      "low",
+      "Enable dust filter",
+      "The visible graph is getting dense. Hiding low-value and same-transaction noise can make the investigation path easier to read.",
+    ));
+  }
+
+  const importantLabels = nodes.flatMap((node) => nodeLabels(node)).filter((label) => ["hacker", "exchange_suspect", "known_entity", "known_exchange", "bridge", "bridge_contract"].includes(label));
+  if (importantLabels.length > 0) {
+    add(memoryAction(
+      "export:case-memory",
+      "export_report",
+      "low",
+      "Store this case memory on Walrus",
+      "The case has analyst labels. Exporting or uploading preserves the current investigation state for later review or agent handoff.",
+    ));
+  }
+
+  return Array.from(actions.values())
+    .sort((a, b) => actionPriorityRank(a.priority) - actionPriorityRank(b.priority) || actionTypeRank(memoryActionType(a)) - actionTypeRank(memoryActionType(b)) || a.title.localeCompare(b.title))
+    .slice(0, 6);
+}
+
+function currentMemoryAgentActions(graph) {
+  if (restoredSuggestedActions.length > 0) return cloneValue(restoredSuggestedActions);
+  return memoryAgentActionsForGraph(graph);
+}
+
+function renderMemoryAgentSuggestions(graph) {
+  const actions = currentMemoryAgentActions(graph);
+  els.flowTitle.textContent = actions.length ? "Investigation Leads" : "Select a flow";
+  els.flowSummary.textContent = actions.length
+    ? "Deterministic leads from the current case memory. Boundary labels stop normal expansion and shift the task to verification or flow inspection."
+    : "Click a line in the graph to inspect every transaction inside that aggregated flow.";
+  els.flowList.innerHTML = "";
+
+  for (const action of actions) {
+    const row = document.createElement("article");
+    row.className = "flow-item suggestion-item";
+
+    const title = document.createElement("strong");
+    title.textContent = action.title;
+
+    const meta = document.createElement("p");
+    meta.textContent = `${action.priority} priority · ${memoryActionType(action).replace(/_/g, " ")}`;
+
+    const rationale = document.createElement("p");
+    rationale.className = "suggestion-rationale";
+    rationale.textContent = action.rationale;
+
+    row.append(title, meta, rationale);
+    if (action.targetNodeId && graph.nodes.some((node) => node.id === action.targetNodeId)) {
+      row.addEventListener("click", () => selectNode(action.targetNodeId));
+      row.setAttribute("role", "button");
+      row.setAttribute("tabindex", "0");
+    } else if (action.targetFlowKey) {
+      row.addEventListener("click", () => selectFlow(action.targetFlowKey));
+      row.setAttribute("role", "button");
+      row.setAttribute("tabindex", "0");
+    }
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      row.click();
+    });
+    els.flowList.append(row);
+  }
 }
 
 function canonicalize(value) {
@@ -1915,6 +2553,613 @@ function txDigestsFromEdges(edges) {
   return Array.from(new Set(edges.flatMap((edge) => edge.items || [edge]).map((edge) => edge.txDigest))).filter(Boolean);
 }
 
+
+function textByteLength(value) {
+  return new TextEncoder().encode(String(value || "")).length;
+}
+
+function uniqueList(values) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function flowEndpointNodeIds(flow) {
+  return [flow.from, flow.to].filter((nodeId) => nodeId && !String(nodeId).startsWith("protocol:"));
+}
+
+function rulesSummaryForGraph({ graph, visibleNodes, rawVisibleEdges, displayEdges, caseMemory, suggestedNextActions, createdAtMs }) {
+  const nodeMetrics = new Map(visibleNodes.map((node) => [node.id, {
+    inDegree: 0,
+    outDegree: 0,
+    flowCount: 0,
+    incomingTxCount: 0,
+    outgoingTxCount: 0,
+    counterparties: new Set(),
+    flowKeys: new Set(),
+    txDigests: new Set(),
+  }]));
+
+  for (const flow of displayEdges) {
+    const txCount = Number(flow.txCount || 0);
+    const fromMetrics = nodeMetrics.get(flow.from);
+    const toMetrics = nodeMetrics.get(flow.to);
+    if (fromMetrics) {
+      fromMetrics.outDegree += 1;
+      fromMetrics.flowCount += 1;
+      fromMetrics.outgoingTxCount += txCount;
+      fromMetrics.counterparties.add(flow.to);
+      fromMetrics.flowKeys.add(flow.key);
+      for (const digest of flow.txDigests || []) fromMetrics.txDigests.add(digest);
+    }
+    if (toMetrics) {
+      toMetrics.inDegree += 1;
+      toMetrics.flowCount += 1;
+      toMetrics.incomingTxCount += txCount;
+      toMetrics.counterparties.add(flow.from);
+      toMetrics.flowKeys.add(flow.key);
+      for (const digest of flow.txDigests || []) toMetrics.txDigests.add(digest);
+    }
+  }
+
+  const importantNodes = visibleNodes
+    .map((node) => {
+      const metrics = nodeMetrics.get(node.id);
+      const score = (metrics?.flowCount || 0) + (metrics?.incomingTxCount || 0) + (metrics?.outgoingTxCount || 0) + (node.labels || []).length * 2;
+      const reasons = [];
+      if (node.id === graph.seedAddress) reasons.push("case seed address");
+      if ((metrics?.inDegree || 0) >= 2) reasons.push("multiple incoming visual flows");
+      if ((metrics?.outDegree || 0) >= 2) reasons.push("multiple outgoing visual flows");
+      if ((node.labels || []).length) reasons.push(`analyst label: ${(node.labels || []).join(", ")}`);
+      return {
+        address: node.address || node.id,
+        shortAddress: node.shortAddress || shortAddress(node.address || node.id),
+        labels: node.labels || [],
+        reason: reasons.join("; ") || "connected visible node",
+        metrics: {
+          in_degree: metrics?.inDegree || 0,
+          out_degree: metrics?.outDegree || 0,
+          flow_count: metrics?.flowCount || 0,
+          incoming_tx_count: metrics?.incomingTxCount || 0,
+          outgoing_tx_count: metrics?.outgoingTxCount || 0,
+          distinct_counterparties: metrics?.counterparties.size || 0,
+        },
+        evidence: {
+          flowKeys: Array.from(metrics?.flowKeys || []).slice(0, 8),
+          txDigests: Array.from(metrics?.txDigests || []).slice(0, 12),
+        },
+        score,
+      };
+    })
+    .filter((node) => node.score > 0 || node.address === graph.seedAddress)
+    .sort((a, b) => b.score - a.score || b.metrics.flow_count - a.metrics.flow_count)
+    .slice(0, 10)
+    .map(({ score, ...node }) => node);
+
+  const importantFlows = [...displayEdges]
+    .map((flow) => ({
+      key: flow.key,
+      from: flow.from,
+      to: flow.to,
+      label: memoryFlowLabel(flow),
+      isBidirectional: Boolean(flow.isBidirectional),
+      txCount: Number(flow.txCount || 0),
+      assetCount: Number(flow.assetCount || 1),
+      magnitudeEstimate: memoryFlowMagnitude(flow),
+      evidence: {
+        flowKey: flow.key,
+        txDigests: flow.txDigests || txDigestsFromEdges([flow]),
+      },
+    }))
+    .sort((a, b) => b.magnitudeEstimate - a.magnitudeEstimate || b.txCount - a.txCount)
+    .slice(0, 10);
+
+  const patterns = [];
+  const seedOut = displayEdges.filter((flow) => flow.from === graph.seedAddress).length;
+  const seedIn = displayEdges.filter((flow) => flow.to === graph.seedAddress).length;
+  if (seedOut >= 3) {
+    patterns.push({
+      type: "seed_fan_out",
+      description: `The seed address has ${seedOut} outgoing visual flows in the current visible graph.`,
+      evidence_edges: displayEdges.filter((flow) => flow.from === graph.seedAddress).map((flow) => flow.key).slice(0, 10),
+      txDigests: uniqueList(displayEdges.filter((flow) => flow.from === graph.seedAddress).flatMap((flow) => flow.txDigests || [])).slice(0, 12),
+    });
+  }
+  if (seedIn >= 3) {
+    patterns.push({
+      type: "seed_fan_in",
+      description: `The seed address has ${seedIn} incoming visual flows in the current visible graph.`,
+      evidence_edges: displayEdges.filter((flow) => flow.to === graph.seedAddress).map((flow) => flow.key).slice(0, 10),
+      txDigests: uniqueList(displayEdges.filter((flow) => flow.to === graph.seedAddress).flatMap((flow) => flow.txDigests || [])).slice(0, 12),
+    });
+  }
+  const convergenceNodes = importantNodes.filter((node) => node.metrics.in_degree >= 2 && node.address !== graph.seedAddress);
+  for (const node of convergenceNodes.slice(0, 3)) {
+    patterns.push({
+      type: "possible_convergence_node",
+      description: `${node.shortAddress} receives multiple visible flows and may be worth reviewing as a convergence point in this graph.`,
+      targetNodeId: node.address,
+      evidence_edges: node.evidence.flowKeys,
+      txDigests: node.evidence.txDigests,
+    });
+  }
+  const protocolFlows = displayEdges.filter((flow) => flow.isBidirectional || String(flow.from).startsWith("protocol:") || String(flow.to).startsWith("protocol:"));
+  if (protocolFlows.length) {
+    patterns.push({
+      type: "protocol_or_bidirectional_activity",
+      description: `${protocolFlows.length} visible flow(s) involve protocol nodes or bidirectional interactions and should be inspected before interpretation.`,
+      evidence_edges: protocolFlows.map((flow) => flow.key).slice(0, 10),
+      txDigests: uniqueList(protocolFlows.flatMap((flow) => flow.txDigests || [])).slice(0, 12),
+    });
+  }
+
+  const analystLabels = visibleNodes
+    .filter((node) => (node.labels || []).length > 0)
+    .map((node) => ({
+      address: node.address || node.id,
+      shortAddress: node.shortAddress || shortAddress(node.address || node.id),
+      labels: node.labels,
+    }));
+
+  return {
+    kind: "sui-caseflow/rules-summary",
+    schema_version: "0.1",
+    generated_at: new Date(createdAtMs).toISOString(),
+    generated_at_ms: createdAtMs,
+    seedAddress: graph.seedAddress,
+    graph_stats: {
+      visible_node_count: visibleNodes.length,
+      visible_display_flow_count: displayEdges.length,
+      visible_raw_flow_count: rawVisibleEdges.length,
+      tx_count: txDigestsFromEdges(rawVisibleEdges).length,
+      source_tx_count: trace?.txCount || graph.timeline?.length || 0,
+      dust_filter_enabled: dustFilterEnabled,
+    },
+    important_nodes: importantNodes,
+    important_flows: importantFlows,
+    patterns,
+    analyst_labels: analystLabels,
+    suggested_next_actions: suggestedNextActions,
+    case_memory_reference: {
+      kind: caseMemory.kind,
+      summary: caseMemory.summary,
+    },
+  };
+}
+
+
+function firstUsefulAiText(aiNotes, field) {
+  const value = aiNotes?.[field];
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    const first = value.find((item) => typeof item === "string" && item.trim());
+    if (first) return first.trim();
+    const claim = value.find((item) => item && typeof item.claim === "string" && item.claim.trim());
+    if (claim) return claim.claim.trim();
+  }
+  return "";
+}
+
+function topSuggestedAction(caseMemory) {
+  const actions = Array.isArray(caseMemory?.suggestedNextActions) ? caseMemory.suggestedNextActions : [];
+  return actions.find((action) => action.priority === "high") || actions[0] || null;
+}
+
+function memwalImportantNodes(rulesSummary, limit = 6) {
+  return (rulesSummary?.important_nodes || []).slice(0, limit).map((node) => ({
+    address: node.address,
+    address_short: node.shortAddress || shortAddress(node.address),
+    labels: node.labels || [],
+    reason: node.reason || "important visible node",
+    metrics: node.metrics || {},
+    evidence: node.evidence || {},
+  }));
+}
+
+function memwalTraceBoundaries(rulesSummary) {
+  const boundaryLabels = new Map([
+    ["exchange_suspect", {
+      reason: "Analyst-provided exchange_suspect label. Further normal expansion may introduce unrelated service or exchange flows.",
+      recommended_action: "verify_before_expanding",
+    }],
+    ["known_entity", {
+      reason: "Analyst-provided known_entity label. Treat this as a verification boundary before following unrelated entity flows.",
+      recommended_action: "verify_before_expanding",
+    }],
+    ["known_exchange", {
+      reason: "Analyst-provided known_exchange label. Treat this as an exchange boundary and verify context before expanding service-side activity.",
+      recommended_action: "verify_before_expanding",
+    }],
+    ["bridge", {
+      reason: "Analyst-provided bridge label. Inspect bridge event details, amount, timestamp, and continuation evidence before expanding service-side flows.",
+      recommended_action: "inspect_bridge_evidence",
+    }],
+    ["bridge_contract", {
+      reason: "Analyst-provided bridge_contract label. Inspect bridge event details, amount, timestamp, and continuation evidence before expanding service-side flows.",
+      recommended_action: "inspect_bridge_evidence",
+    }],
+  ]);
+  return (rulesSummary?.analyst_labels || [])
+    .flatMap((node) => (node.labels || [])
+      .filter((label) => boundaryLabels.has(label))
+      .map((label) => ({
+        address: node.address,
+        address_short: node.shortAddress || shortAddress(node.address),
+        boundary_type: label,
+        source: "analyst_label",
+        reason: boundaryLabels.get(label).reason,
+        recommended_action: boundaryLabels.get(label).recommended_action,
+      })))
+    .slice(0, 6);
+}
+
+function memwalPatternTypes(rulesSummary) {
+  const patterns = (rulesSummary?.patterns || []).map((pattern) => pattern.type).filter(Boolean);
+  const actions = (rulesSummary?.suggested_next_actions || []).map((action) => memoryActionType(action)).filter(Boolean);
+  return uniqueList([...patterns, ...actions]).slice(0, 12);
+}
+
+function memwalTokenSymbols(rulesSummary) {
+  return uniqueList((rulesSummary?.important_flows || [])
+    .flatMap((flow) => String(flow.label || "").match(/\b[A-Z][A-Z0-9]{1,10}\b/g) || [])
+    .filter((symbol) => !["TX", "TXS"].includes(symbol)))
+    .slice(0, 12);
+}
+
+function memwalSearchText({ rulesSummary, aiNotes, boundaries, nextAction }) {
+  const seed = shortAddress(rulesSummary?.seedAddress || "");
+  const summary = firstUsefulAiText(aiNotes, "plain_language_summary")
+    || `Sui investigation handoff for seed ${seed}.`;
+  const topObservation = firstUsefulAiText(aiNotes, "key_observations");
+  const boundaryText = boundaries.length
+    ? `Trace boundaries include ${boundaries.map((boundary) => `${boundary.address_short} (${boundary.boundary_type})`).join(", ")}.`
+    : "No labeled trace boundary is highlighted in the current visible graph.";
+  const fallbackNextText = firstUsefulAiText(aiNotes, "next_steps") || "Review the highest-priority investigation lead.";
+  const nextText = isBoundaryAction(nextAction)
+    ? `${nextAction?.title || "Verify boundary"}. Treat this as a verification boundary before expanding through service or entity flows.`
+    : (nextAction?.title || fallbackNextText);
+  return [
+    summary,
+    topObservation,
+    boundaryText,
+    `Next best action: ${nextText}`,
+  ].filter(Boolean).join(" ");
+}
+
+function memwalMemoryCardForBundle(bundle) {
+  const rulesSummary = bundle.rulesSummary || {};
+  const caseMemory = bundle.caseMemory || {};
+  const aiNotes = bundle.aiNotes || aiNotesFromRulesSummary(rulesSummary);
+  const boundaries = memwalTraceBoundaries(rulesSummary);
+  const nextAction = topSuggestedAction(caseMemory) || (rulesSummary.suggested_next_actions || [])[0] || null;
+  const importantNodes = memwalImportantNodes(rulesSummary);
+  const labels = uniqueList((rulesSummary.analyst_labels || []).flatMap((node) => node.labels || []));
+  const summary = firstUsefulAiText(aiNotes, "plain_language_summary")
+    || `Visible Sui fund-flow case for seed ${shortAddress(rulesSummary.seedAddress || caseMemory.seedAddress || "")}.`;
+  const primaryLeadNode = importantNodes.find((node) => node.address !== rulesSummary.seedAddress) || importantNodes[0] || null;
+  const primaryLead = isBoundaryAction(nextAction)
+    ? `${nextAction?.title || "Verify boundary"}: verify this trace boundary before expanding through service or entity flows.`
+    : (nextAction?.title
+      || firstUsefulAiText(aiNotes, "next_steps")
+      || (primaryLeadNode ? `Review ${primaryLeadNode.address_short}: ${primaryLeadNode.reason}` : "Review the visible graph and labels before expanding further."));
+  const openQuestions = Array.isArray(aiNotes.open_questions) && aiNotes.open_questions.length
+    ? aiNotes.open_questions.slice(0, 3).map((question) => String(question))
+    : (caseMemory.suggestedNextActions || []).slice(0, 3).map((action) => action.rationale).filter(Boolean);
+  const txDigests = uniqueList([
+    ...(caseMemory.txDigests || []),
+    ...((rulesSummary.important_flows || []).flatMap((flow) => flow.evidence?.txDigests || [])),
+  ]).slice(0, 40);
+
+  return {
+    schema_version: "0.1",
+    artifact_type: "memwal_memory",
+    memory_type: "sui_investigation_handoff",
+    intended_use: "future_memwal_remember_payload",
+    generated_at: rulesSummary.generated_at || new Date(caseMemory.createdAtMs || Date.now()).toISOString(),
+    generated_at_ms: rulesSummary.generated_at_ms || caseMemory.createdAtMs || Date.now(),
+    root_address: rulesSummary.seedAddress || caseMemory.seedAddress || "",
+    root_address_short: shortAddress(rulesSummary.seedAddress || caseMemory.seedAddress || ""),
+    summary,
+    primary_lead: primaryLead,
+    trace_boundaries: boundaries,
+    open_questions: openQuestions,
+    next_best_action: nextAction ? {
+      id: nextAction.id || "",
+      type: memoryActionType(nextAction),
+      priority: nextAction.priority || "medium",
+      title: nextAction.title || "",
+      rationale: nextAction.rationale || "",
+      targetNodeId: nextAction.targetNodeId || "",
+      targetFlowKey: nextAction.targetFlowKey || "",
+      txDigests: nextAction.txDigests || [],
+    } : null,
+    search_text: memwalSearchText({ rulesSummary, aiNotes, boundaries, nextAction }),
+    metadata: {
+      network: "sui-mainnet",
+      root_address: rulesSummary.seedAddress || caseMemory.seedAddress || "",
+      labels,
+      tokens: memwalTokenSymbols(rulesSummary),
+      pattern_types: memwalPatternTypes(rulesSummary),
+      boundary_types: uniqueList(boundaries.map((boundary) => boundary.boundary_type)),
+      important_nodes: importantNodes,
+      tx_digests: txDigests,
+      visible_counts: {
+        node_count: rulesSummary.graph_stats?.visible_node_count || caseMemory.summary?.visibleNodeCount || 0,
+        display_flow_count: rulesSummary.graph_stats?.visible_display_flow_count || caseMemory.summary?.visibleDisplayFlowCount || 0,
+        raw_flow_count: rulesSummary.graph_stats?.visible_raw_flow_count || caseMemory.summary?.visibleFlowCount || 0,
+        tx_count: rulesSummary.graph_stats?.tx_count || caseMemory.summary?.txCount || txDigests.length,
+      },
+      next_action_type: memoryActionType(nextAction),
+    },
+    source_artifacts: {
+      snapshot: {
+        filename: "snapshot.json",
+        hash: bundle.snapshotHash || "",
+      },
+      report: {
+        filename: "report.html",
+        hash: null,
+        note: "HTML report is generated from the active snapshot bundle at download or upload time.",
+      },
+      case_memory: {
+        filename: "case_memory.json",
+        hash: bundle.caseMemoryHash || "",
+      },
+      rules_summary: {
+        filename: "rules_summary.json",
+        hash: bundle.rulesSummaryHash || "",
+      },
+      ai_notes: {
+        filename: "ai_notes.json",
+        hash: bundle.aiNotesHash || "",
+        generated_by: aiNotes.generated_by || "rule_template",
+      },
+    },
+    package_manifest: "case_manifest.json",
+    public_memory_boundary: "This memory card only summarizes case context, analyst labels, trace boundaries, open questions, and next actions intended for the public case package. It should not contain private analyst notes or sensitive off-chain claims.",
+  };
+}
+
+async function refreshMemwalMemoryForSnapshotBundle(bundle) {
+  const memwalMemory = memwalMemoryCardForBundle(bundle);
+  const memwalMemoryJson = `${JSON.stringify(canonicalize(memwalMemory), null, 2)}\n`;
+  const memwalMemoryHash = await sha256Hex(memwalMemoryJson);
+  bundle.memwalMemory = memwalMemory;
+  bundle.memwalMemoryJson = memwalMemoryJson;
+  bundle.memwalMemoryHash = memwalMemoryHash;
+}
+
+function aiNotesFromRulesSummary(rulesSummary) {
+  const stats = rulesSummary.graph_stats || {};
+  const importantNodes = rulesSummary.important_nodes || [];
+  const importantFlows = rulesSummary.important_flows || [];
+  const patterns = rulesSummary.patterns || [];
+  const labels = rulesSummary.analyst_labels || [];
+  const actions = rulesSummary.suggested_next_actions || [];
+  const topNode = importantNodes.find((node) => node.address !== rulesSummary.seedAddress) || importantNodes[0];
+  const topFlow = importantFlows[0];
+
+  const keyObservations = [
+    `The visible graph currently contains ${stats.visible_node_count || 0} node(s), ${stats.visible_display_flow_count || 0} visual flow(s), and ${stats.tx_count || 0} transaction digest(s).`,
+  ];
+  if (topFlow) {
+    keyObservations.push(`The largest highlighted visible flow is ${topFlow.label} from ${shortAddress(topFlow.from)} to ${shortAddress(topFlow.to)}.`);
+  }
+  if (topNode) {
+    keyObservations.push(`${shortAddress(topNode.address)} is prominent in the current rules summary because ${topNode.reason}.`);
+  }
+  if (patterns[0]) {
+    keyObservations.push(patterns[0].description);
+  }
+  if (labels.length) {
+    keyObservations.push(`${labels.length} visible node(s) carry analyst labels that should be treated as investigation context rather than confirmed identity.`);
+  }
+
+  const hypotheses = [];
+  if (topNode && topNode.address !== rulesSummary.seedAddress) {
+    hypotheses.push({
+      claim: `${shortAddress(topNode.address)} may be a useful lead based on visible graph structure.`,
+      confidence: "medium",
+      supporting_evidence: uniqueList([...(topNode.evidence?.flowKeys || []), ...(topNode.evidence?.txDigests || [])]).slice(0, 8),
+    });
+  }
+  for (const pattern of patterns.slice(0, 2)) {
+    hypotheses.push({
+      claim: `${pattern.type.replace(/_/g, " ")} may be relevant to the next investigation step.`,
+      confidence: "low",
+      supporting_evidence: uniqueList([...(pattern.evidence_edges || []), ...(pattern.txDigests || [])]).slice(0, 8),
+    });
+  }
+
+  const openQuestions = [];
+  if (topNode?.address && topNode.address !== rulesSummary.seedAddress) {
+    openQuestions.push(`What happens if outgoing and incoming flows around ${shortAddress(topNode.address)} are expanded further?`);
+  }
+  if (patterns.some((pattern) => pattern.type.includes("convergence"))) {
+    openQuestions.push("Do the visible convergence patterns continue into another address or protocol interaction?");
+  }
+  if (labels.length) {
+    openQuestions.push("Do analyst labels remain consistent after checking the linked explorer activity and additional hops?");
+  }
+  if (!openQuestions.length) openQuestions.push("Which visible address or flow should be expanded next to improve the investigation context?");
+
+  const nextSteps = actions.length
+    ? actions.slice(0, 5).map((action) => action.title)
+    : ["Inspect the highest-value visible flow in Flow Details.", "Expand one unexpanded address connected to the seed or a labeled node."];
+
+  return {
+    schema_version: "0.1",
+    generated_by: "rule_template",
+    generated_at: rulesSummary.generated_at,
+    plain_language_summary: `This rule-generated note summarizes visible fund-flow patterns for seed ${shortAddress(rulesSummary.seedAddress)}. Based on the current graph, the case has ${stats.visible_node_count || 0} visible node(s), ${stats.visible_display_flow_count || 0} visual flow(s), and ${stats.tx_count || 0} transaction digest(s). The observations below are deterministic investigation notes and should be used as context for continued review.`,
+    key_observations: keyObservations.slice(0, 6),
+    hypotheses: hypotheses.slice(0, 4),
+    open_questions: openQuestions.slice(0, 5),
+    next_steps: nextSteps,
+    caution: "These notes describe fund-flow patterns only. They do not assert real-world identity, ownership, criminal intent, or legal conclusions.",
+  };
+}
+
+function artifactManifestEntry({ filename, type, contentType, hash, content, description, generator, aiReady }) {
+  return {
+    filename,
+    type,
+    content_type: contentType,
+    hash,
+    size_bytes: textByteLength(content),
+    description,
+    ...(generator ? { generator } : {}),
+    ...(typeof aiReady === "boolean" ? { ai_ready: aiReady } : {}),
+  };
+}
+
+function snapshotArtifactForJson(snapshot) {
+  const { snapshotHash, caseMemoryHash, metadata, ...artifact } = snapshot || {};
+  return artifact;
+}
+
+async function refreshSnapshotArtifactForSnapshotBundle(bundle) {
+  const snapshotArtifact = snapshotArtifactForJson(bundle.snapshot);
+  const snapshotJson = `${JSON.stringify(canonicalize(snapshotArtifact), null, 2)}
+`;
+  const snapshotHash = await sha256Hex(snapshotJson);
+  bundle.snapshotJson = snapshotJson;
+  bundle.snapshotHash = snapshotHash;
+  bundle.snapshot = {
+    ...snapshotArtifact,
+    snapshotHash,
+    caseMemoryHash: bundle.caseMemoryHash,
+    metadata: {
+      ...bundle.metadata,
+      image_url: `local://caseflow/${snapshotHash}.svg`,
+      snapshot_url: `local://caseflow/${snapshotHash}.json`,
+      snapshot_hash: snapshotHash,
+    },
+  };
+  bundle.metadata = bundle.snapshot.metadata;
+}
+
+function sourceArtifactsForSnapshotBundle(bundle) {
+  return {
+    input_snapshot_hash: bundle?.inputSnapshotHash || bundle?.snapshotHash || "",
+    rules_summary_hash: bundle?.rulesSummaryHash || "",
+    case_memory_hash: bundle?.caseMemoryHash || "",
+  };
+}
+
+function manifestArtifactEntriesForBundle(bundle) {
+  return {
+    report: {
+      filename: "report.html",
+      type: "report_html",
+      content_type: "text/html;charset=utf-8",
+      hash: null,
+      size_bytes: null,
+      description: "Human-readable investigation report generated from this package",
+    },
+    snapshot: artifactManifestEntry({
+      filename: "snapshot.json",
+      type: "snapshot_json",
+      contentType: "application/json;charset=utf-8",
+      hash: bundle.snapshotHash,
+      content: bundle.snapshotJson,
+      description: "Recoverable visible graph state",
+    }),
+    caseMemory: artifactManifestEntry({
+      filename: "case_memory.json",
+      type: "case_memory_json",
+      contentType: "application/json;charset=utf-8",
+      hash: bundle.caseMemoryHash,
+      content: bundle.caseMemoryJson,
+      description: "Persistent investigation memory and suggested next actions",
+    }),
+    rulesSummary: artifactManifestEntry({
+      filename: "rules_summary.json",
+      type: "rules_summary_json",
+      contentType: "application/json;charset=utf-8",
+      hash: bundle.rulesSummaryHash,
+      content: bundle.rulesSummaryJson,
+      description: "Deterministic graph summary used as AI-ready notes input",
+      generator: "deterministic_rules",
+      aiReady: true,
+    }),
+    aiNotes: artifactManifestEntry({
+      filename: "ai_notes.json",
+      type: "ai_notes_json",
+      contentType: "application/json;charset=utf-8",
+      hash: bundle.aiNotesHash,
+      content: bundle.aiNotesJson,
+      description: bundle.aiNotes?.generated_by === "openai"
+        ? "OpenAI-generated investigation notes using the AI notes schema"
+        : "Rule-generated investigation notes using the future AI notes schema",
+      generator: bundle.aiNotes?.generated_by || "rule_template",
+      aiReady: true,
+    }),
+    memwalMemory: artifactManifestEntry({
+      filename: "memwal_memory.json",
+      type: "agent_memory_card",
+      contentType: "application/json;charset=utf-8",
+      hash: bundle.memwalMemoryHash,
+      content: bundle.memwalMemoryJson,
+      description: "MemWal-ready compact investigation memory card for future agent recall",
+      generator: "deterministic_memory_card",
+      aiReady: true,
+    }),
+  };
+}
+
+async function refreshCaseManifestForSnapshotBundle(bundle) {
+  const caseManifest = {
+    kind: "sui-caseflow/case-manifest",
+    version: 1,
+    caseId: `case-${bundle.snapshotHash.slice(0, 12)}`,
+    createdAtMs: bundle.snapshot.createdAtMs,
+    network: bundle.snapshot.network,
+    seedAddress: bundle.snapshot.seedAddress,
+    artifacts: manifestArtifactEntriesForBundle(bundle),
+    hashes: {
+      snapshotHash: bundle.snapshotHash,
+      caseMemoryHash: bundle.caseMemoryHash,
+      rulesSummaryHash: bundle.rulesSummaryHash,
+      aiNotesHash: bundle.aiNotesHash,
+      memwalMemoryHash: bundle.memwalMemoryHash,
+      imageHash: bundle.snapshot.image?.sha256 || "",
+    },
+    restore: {
+      canRestoreGraph: true,
+      canRestoreLabels: true,
+      canRestoreViewport: true,
+      canRestoreSuggestedActions: true,
+      entryArtifact: "snapshot.json",
+    },
+  };
+  const caseManifestJson = `${JSON.stringify(canonicalize(caseManifest), null, 2)}
+`;
+  const caseManifestHash = await sha256Hex(caseManifestJson);
+  bundle.caseManifest = caseManifest;
+  bundle.caseManifestJson = caseManifestJson;
+  bundle.caseManifestHash = caseManifestHash;
+}
+
+async function replacePendingAiNotes(aiNotes) {
+  if (!pendingSnapshot) return;
+  const nextNotes = cloneValue(aiNotes);
+  const aiNotesJson = `${JSON.stringify(canonicalize(nextNotes), null, 2)}
+`;
+  const aiNotesHash = await sha256Hex(aiNotesJson);
+  pendingSnapshot.aiNotes = nextNotes;
+  pendingSnapshot.aiNotesJson = aiNotesJson;
+  pendingSnapshot.aiNotesHash = aiNotesHash;
+  pendingSnapshot.snapshot.aiNotes = nextNotes;
+  pendingSnapshot.snapshot.aiNotesHash = aiNotesHash;
+  await refreshSnapshotArtifactForSnapshotBundle(pendingSnapshot);
+  await refreshMemwalMemoryForSnapshotBundle(pendingSnapshot);
+  await refreshCaseManifestForSnapshotBundle(pendingSnapshot);
+}
+
+async function markRuleNotesFallback(reason) {
+  if (!pendingSnapshot || pendingSnapshot.aiNotes?.generated_by !== "rule_template") return;
+  await replacePendingAiNotes({ ...pendingSnapshot.aiNotes, fallback_reason: reason });
+}
+
 async function createEvidenceSnapshot() {
   if (!trace?.graphSnapshot) throw new Error("Trace a case before minting a snapshot.");
   renderGraph(trace.graphSnapshot);
@@ -1950,6 +3195,7 @@ async function createEvidenceSnapshot() {
     })),
   }));
 
+  const suggestedNextActions = memoryAgentActionsForGraph(graph, displayEdges, visibleNodes);
   const svgText = currentGraphSvgText();
   const imageHash = await sha256Hex(svgText);
   const createdAtMs = Date.now();
@@ -2010,7 +3256,7 @@ async function createEvidenceSnapshot() {
     report: {
       imageHash,
     },
-    suggestedNextActions: [],
+    suggestedNextActions,
   };
   const caseMemoryJsonBase = `${JSON.stringify(canonicalize(caseMemoryBase), null, 2)}
 `;
@@ -2021,7 +3267,7 @@ async function createEvidenceSnapshot() {
     caseMemory: {
       kind: caseMemoryBase.kind,
       hash: caseMemoryHashBase,
-      suggestedNextActions: [],
+      suggestedNextActions,
     },
   };
   const snapshotJson = `${JSON.stringify(canonicalize(snapshotWithMemory), null, 2)}
@@ -2037,17 +3283,61 @@ async function createEvidenceSnapshot() {
   const caseMemoryJson = `${JSON.stringify(canonicalize(caseMemory), null, 2)}
 `;
   const caseMemoryHash = await sha256Hex(caseMemoryJson);
-  const snapshotFinal = {
+  const rulesSummary = rulesSummaryForGraph({
+    graph,
+    visibleNodes,
+    rawVisibleEdges,
+    displayEdges,
+    caseMemory,
+    suggestedNextActions,
+    createdAtMs,
+  });
+  const rulesSummaryJson = `${JSON.stringify(canonicalize(rulesSummary), null, 2)}
+`;
+  const rulesSummaryHash = await sha256Hex(rulesSummaryJson);
+  const snapshotInput = {
     ...snapshotCore,
     caseMemory: {
       kind: caseMemory.kind,
       hash: caseMemoryHash,
-      suggestedNextActions: [],
+      suggestedNextActions,
     },
+  };
+  const snapshotInputJson = `${JSON.stringify(canonicalize(snapshotInput), null, 2)}
+`;
+  const inputSnapshotHash = await sha256Hex(snapshotInputJson);
+  const aiNotes = restoredAiNotes && typeof restoredAiNotes === "object"
+    ? cloneValue(restoredAiNotes)
+    : aiNotesFromRulesSummary(rulesSummary);
+  const aiNotesJson = `${JSON.stringify(canonicalize(aiNotes), null, 2)}
+`;
+  const aiNotesHash = await sha256Hex(aiNotesJson);
+  const snapshotFinal = {
+    ...snapshotInput,
+    aiNotes,
+    aiNotesHash,
   };
   const snapshotFinalJson = `${JSON.stringify(canonicalize(snapshotFinal), null, 2)}
 `;
   const snapshotFinalHash = await sha256Hex(snapshotFinalJson);
+  const caseManifestStubBundle = {
+    snapshot: snapshotFinal,
+    snapshotJson: snapshotFinalJson,
+    snapshotHash: snapshotFinalHash,
+    inputSnapshotHash,
+    caseMemory,
+    caseMemoryJson,
+    caseMemoryHash,
+    rulesSummary,
+    rulesSummaryJson,
+    rulesSummaryHash,
+    aiNotes,
+    aiNotesJson,
+    aiNotesHash,
+  };
+  await refreshMemwalMemoryForSnapshotBundle(caseManifestStubBundle);
+  await refreshCaseManifestForSnapshotBundle(caseManifestStubBundle);
+  const { memwalMemory, memwalMemoryJson, memwalMemoryHash, caseManifest, caseManifestJson, caseManifestHash } = caseManifestStubBundle;
   const metadata = {
     name: `Sui CaseFlow Snapshot ${shortAddress(trace.seedAddress)}`,
     description: `Case snapshot for seed ${trace.seedAddress}. This is a testnet artifact, not a legal attestation.`,
@@ -2064,9 +3354,22 @@ async function createEvidenceSnapshot() {
     snapshot: { ...snapshotFinal, snapshotHash: snapshotFinalHash, caseMemoryHash, metadata },
     snapshotJson: snapshotFinalJson,
     snapshotHash: snapshotFinalHash,
+    inputSnapshotHash,
     caseMemory,
     caseMemoryJson,
     caseMemoryHash,
+    rulesSummary,
+    rulesSummaryJson,
+    rulesSummaryHash,
+    aiNotes,
+    aiNotesJson,
+    aiNotesHash,
+    memwalMemory,
+    memwalMemoryJson,
+    memwalMemoryHash,
+    caseManifest,
+    caseManifestJson,
+    caseManifestHash,
     metadata,
   };
 
@@ -2087,11 +3390,15 @@ async function openMintPreview() {
     els.snapshotSeed.textContent = pendingSnapshot.metadata.seed_address;
     els.snapshotStats.textContent = `${pendingSnapshot.snapshot.visibleNodeCount} nodes · ${pendingSnapshot.snapshot.visibleDisplayFlowCount} visual flows · ${pendingSnapshot.snapshot.txDigests.length} txs`;
     els.snapshotHash.textContent = pendingSnapshot.snapshotHash;
-    setMintStatus("Preview ready. Download a report, export JSON, or mint on Sui testnet.");
+    setMintStatus("Preview ready. Generate AI notes, download files, upload to Walrus, or mint on Sui testnet.");
     els.mintDialog.showModal();
   } catch (error) {
     pendingSnapshot = null;
-    setMintStatus(error.message, "error");
+    const message = error.message || "Could not prepare case snapshot.";
+    setMintStatus(message, "error");
+    els.flowTitle.textContent = "Case Snapshot failed";
+    els.flowSummary.textContent = message;
+    els.flowList.innerHTML = "";
   } finally {
     els.mintSnapshotButton.disabled = false;
   }
@@ -2196,6 +3503,35 @@ function buildCaseReportHtml(snapshotBundle) {
       </section>`;
   }).join("");
 
+  const aiNotes = snapshotBundle.aiNotes || {};
+  const memwalMemory = snapshotBundle.memwalMemory || {};
+  const memwalBoundaries = Array.isArray(memwalMemory.trace_boundaries) ? memwalMemory.trace_boundaries : [];
+  const memwalBoundaryList = memwalBoundaries.length
+    ? `<ul>${memwalBoundaries.map((boundary) => `<li>${reportEscape(boundary.address_short || shortAddress(boundary.address || ""))} · ${reportEscape(boundary.boundary_type || "boundary")} · ${reportEscape(boundary.recommended_action || "verify_before_expanding")}</li>`).join("")}</ul>`
+    : `<p class="muted">No trace boundaries recorded in the memory card.</p>`;
+  const noteList = (items) => Array.isArray(items) && items.length
+    ? `<ul>${items.map((item) => `<li>${reportEscape(typeof item === "string" ? item : item.claim || JSON.stringify(item))}</li>`).join("")}</ul>`
+    : `<p class="muted">No entries.</p>`;
+  const hypothesisList = Array.isArray(aiNotes.hypotheses) && aiNotes.hypotheses.length
+    ? `<ul>${aiNotes.hypotheses.map((hypothesis) => `<li>${reportEscape(hypothesis.claim || "")}${hypothesis.confidence ? ` <span class="tag">${reportEscape(hypothesis.confidence)}</span>` : ""}</li>`).join("")}</ul>`
+    : `<p class="muted">No hypotheses.</p>`;
+  const suggestedActions = snapshot.caseMemory?.suggestedNextActions || snapshotBundle.caseMemory?.suggestedNextActions || [];
+  const notesGeneratorDescription = aiNotes.generated_by === "openai"
+    ? "These notes were generated by the configured OpenAI adapter from deterministic rules summary and case memory artifacts."
+    : "These notes are currently generated from deterministic rules and are AI-ready. A future OpenAI adapter can produce the same schema without changing the Walrus package format.";
+  const footerNotesDescription = aiNotes.generated_by === "openai"
+    ? "The notes in this report were generated by the configured OpenAI adapter using the AI notes schema."
+    : "The notes in v1 are rule-generated and may later be generated by an OpenAI adapter using the same schema.";
+  const suggestionRows = suggestedActions.length
+    ? suggestedActions.map((action) => `
+      <tr>
+        <td><span class="tag">${reportEscape(action.priority || "medium")}</span></td>
+        <td>${reportEscape(action.title)}</td>
+        <td>${reportEscape(String(memoryActionType(action)).replace(/_/g, " "))}</td>
+        <td>${reportEscape(action.rationale)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="4" class="muted">No suggested next actions.</td></tr>`;
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -2234,6 +3570,44 @@ function buildCaseReportHtml(snapshotBundle) {
     </section>
 
     <section>
+      <h2>Investigation Notes</h2>
+      <div class="card">
+        <p class="eyebrow">${reportEscape(aiNotes.generated_by || "rule_template")} · AI-ready notes schema ${reportEscape(aiNotes.schema_version || "0.1")}</p>
+        <p>${reportEscape(aiNotes.plain_language_summary || "No investigation notes were generated.")}</p>
+        <h3>Key Observations</h3>
+        ${noteList(aiNotes.key_observations)}
+        <h3>Hypotheses</h3>
+        ${hypothesisList}
+        <h3>Open Questions</h3>
+        ${noteList(aiNotes.open_questions)}
+        <h3>Next Steps</h3>
+        ${noteList(aiNotes.next_steps)}
+        <p class="muted">${reportEscape(aiNotes.caution || "These notes describe fund-flow patterns only and do not assert identity, ownership, intent, or legal conclusions.")}</p>
+      </div>
+      <p class="muted">${reportEscape(notesGeneratorDescription)}</p>
+    </section>
+
+    <section>
+      <h2>MemWal Memory Card</h2>
+      <div class="card">
+        <p class="eyebrow">MemWal memory · schema ${reportEscape(memwalMemory.schema_version || "0.1")}</p>
+        <p>${reportEscape(memwalMemory.summary || aiNotes.plain_language_summary || "No memory card summary was generated.")}</p>
+        <h3>Primary Lead</h3>
+        <p>${reportEscape(memwalMemory.primary_lead || "No primary lead recorded.")}</p>
+        <h3>Trace Boundaries</h3>
+        ${memwalBoundaryList}
+        <h3>Next Best Action</h3>
+        <p>${reportEscape(memwalMemory.next_best_action?.title || memwalMemory.next_best_action || "No next action recorded.")}</p>
+        <p class="muted">This compact memory card is designed for future agent recall. The full evidence remains in the case package artifacts.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Suggested Next Actions</h2>
+      <table><thead><tr><th>Priority</th><th>Action</th><th>Type</th><th>Rationale</th></tr></thead><tbody>${suggestionRows}</tbody></table>
+    </section>
+
+    <section>
       <h2>Address Labels</h2>
       <table><thead><tr><th>Address</th><th>Labels</th></tr></thead><tbody>${labelRows}</tbody></table>
     </section>
@@ -2257,13 +3631,64 @@ function buildCaseReportHtml(snapshotBundle) {
         <p class="hash">sha256:${reportEscape(snapshot.image?.sha256 || "")}</p>
         <p><strong>Case memory hash</strong></p>
         <p class="hash">sha256:${reportEscape(snapshotBundle.caseMemoryHash || "")}</p>
+        <p><strong>Rules summary hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshotBundle.rulesSummaryHash || "")}</p>
+        <p><strong>AI notes hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshotBundle.aiNotesHash || "")}</p>
+        <p><strong>Agent memory card hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshotBundle.memwalMemoryHash || "")}</p>
+        <p><strong>Case manifest hash</strong></p>
+        <p class="hash">sha256:${reportEscape(snapshotBundle.caseManifestHash || "")}</p>
       </div>
     </section>
 
-    <p class="footer">This report is generated from the visible Sui CaseFlow graph. Hidden nodes and hidden flows are excluded. The HTML report is for human review and is backed by machine-readable snapshot and case memory artifacts.</p>
+    <p class="footer">This report is generated from the visible Sui CaseFlow graph. Hidden nodes and hidden flows are excluded. The HTML report is for human review and is backed by a machine-readable Walrus case package: manifest, snapshot, case memory, rules summary, AI-ready notes, and MemWal memory artifacts. ${reportEscape(footerNotesDescription)}</p>
   </main>
 </body>
 </html>`;
+}
+
+async function generateAiNotesForSnapshot() {
+  if (!pendingSnapshot) return;
+
+  if (!authSession?.token) {
+    setMintStatus("Connect Wallet before generating AI notes.", "error");
+    await signInWithWallet();
+    if (!authSession?.token) return;
+  }
+
+  els.generateAiNotesButton.disabled = true;
+  setMintStatus("Generating AI investigation notes...");
+
+  try {
+    const response = await fetch("/api/ai-notes", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        rules_summary: pendingSnapshot.rulesSummary,
+        case_memory: pendingSnapshot.caseMemory,
+        source_artifacts: sourceArtifactsForSnapshotBundle(pendingSnapshot),
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+
+    if (result.fallback) {
+      await markRuleNotesFallback(result.fallbackReason || "openai_unavailable");
+      setMintStatus(result.message || "OpenAI provider is not configured. Using rule-generated notes.", "success");
+      return;
+    }
+
+    if (!response.ok) throw new Error(result.error || "AI notes generation failed.");
+    if (!result.aiNotes) throw new Error("AI notes response was empty.");
+
+    await replacePendingAiNotes(result.aiNotes);
+    setMintStatus(`AI notes generated${result.model ? ` with ${result.model}` : ""}. Download or upload when ready.`, "success");
+  } catch (error) {
+    await markRuleNotesFallback("openai_generation_failed");
+    setMintStatus(`${error.message || "AI notes generation failed."} Using rule-generated notes.`, "error");
+  } finally {
+    els.generateAiNotesButton.disabled = false;
+  }
 }
 
 function downloadCaseReport() {
@@ -2310,6 +3735,25 @@ async function uploadCaseToWalrus() {
 
   try {
     const reportHtml = buildCaseReportHtml(pendingSnapshot);
+    let uploadSnapshotGeneratedBy = "";
+    let uploadAiNotesGeneratedBy = "";
+    try {
+      uploadSnapshotGeneratedBy = JSON.parse(pendingSnapshot.snapshotJson)?.aiNotes?.generated_by || "";
+      uploadAiNotesGeneratedBy = JSON.parse(pendingSnapshot.aiNotesJson)?.generated_by || "";
+    } catch {
+      uploadSnapshotGeneratedBy = "parse_failed";
+      uploadAiNotesGeneratedBy = "parse_failed";
+    }
+    console.debug("[CaseFlow] Upload AI notes", {
+      pendingGeneratedBy: pendingSnapshot.aiNotes?.generated_by || "",
+      aiNotesJsonGeneratedBy: uploadAiNotesGeneratedBy,
+      snapshotAiNotesGeneratedBy: uploadSnapshotGeneratedBy,
+      inputSnapshotHash: pendingSnapshot.inputSnapshotHash || "",
+      snapshotHash: pendingSnapshot.snapshotHash || "",
+      aiNotesHash: pendingSnapshot.aiNotesHash || "",
+      caseManifestHash: pendingSnapshot.caseManifestHash || "",
+      memwalMemoryHash: pendingSnapshot.memwalMemoryHash || "",
+    });
     const response = await fetch("/api/walrus/upload-case", {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders() },
@@ -2324,7 +3768,11 @@ async function uploadCaseToWalrus() {
         artifacts: {
           "report.html": reportHtml,
           "snapshot.json": pendingSnapshot.snapshotJson,
-          "case-memory.json": pendingSnapshot.caseMemoryJson,
+          "case_memory.json": pendingSnapshot.caseMemoryJson,
+          "case_manifest.json": pendingSnapshot.caseManifestJson,
+          "rules_summary.json": pendingSnapshot.rulesSummaryJson,
+          "ai_notes.json": pendingSnapshot.aiNotesJson,
+          "memwal_memory.json": pendingSnapshot.memwalMemoryJson,
         },
       }),
     });
@@ -2337,8 +3785,31 @@ async function uploadCaseToWalrus() {
     els.mintStatus.append(" · ");
     els.mintStatus.append(walrusLink("snapshot", result.files?.["snapshot.json"]?.url || result.snapshotUrl));
     els.mintStatus.append(" · ");
-    els.mintStatus.append(walrusLink("memory", result.files?.["case-memory.json"]?.url || result.caseMemoryUrl));
+    els.mintStatus.append(walrusLink("memory", result.files?.["case_memory.json"]?.url || result.caseMemoryUrl));
+    els.mintStatus.append(" · ");
+    els.mintStatus.append(walrusLink("manifest", result.files?.["case_manifest.json"]?.url || result.caseManifestUrl));
+    els.mintStatus.append(" · ");
+    els.mintStatus.append(walrusLink("rules", result.files?.["rules_summary.json"]?.url || result.rulesSummaryUrl));
+    els.mintStatus.append(" · ");
+    els.mintStatus.append(walrusLink("notes", result.files?.["ai_notes.json"]?.url || result.aiNotesUrl));
+    els.mintStatus.append(" · ");
+    els.mintStatus.append(walrusLink("MemWal", result.files?.["memwal_memory.json"]?.url || result.memwalMemoryUrl));
+    const memwalStatusLabels = {
+      saved: "Saved to MemWal",
+      queued: "MemWal queued",
+      skipped: "MemWal not configured",
+      failed: "MemWal save failed",
+    };
+    const memwalStatusLabel = memwalStatusLabels[result.memwal?.status] || "";
+    if (memwalStatusLabel) els.mintStatus.append(` · ${memwalStatusLabel}`);
     els.mintStatus.append(" · Saved to My Snapshots");
+    setCurrentWalrusRefs({
+      quilt_id: result.quiltId,
+      snapshot_url: result.snapshotUrl,
+      snapshot_hash: pendingSnapshot.snapshotHash,
+      memwal_status: result.memwal?.status || "",
+    });
+    renderMemwalAssistant();
     await loadMySnapshots();
     void recordXpEvent("upload_walrus", pendingSnapshot.snapshotHash || result.quiltId, {
       seedAddress: pendingSnapshot.metadata.seed_address,
@@ -2415,6 +3886,14 @@ function handleKeyboardShortcut(event) {
 
 els.walletButton.addEventListener("click", toggleWalletMenu);
 els.signOutButton.addEventListener("click", signOutWallet);
+els.memwalAssistantToggle.addEventListener("click", () => setMemwalAssistantOpen(!memwalAssistantOpen));
+els.memwalRecallButton.addEventListener("click", () => { void recallRelatedCases(); });
+els.walrusRestoreButton.addEventListener("click", restoreWalrusInput);
+els.walrusRestoreInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  void restoreWalrusInput();
+});
 document.addEventListener("click", closeWalletMenuOnOutsideClick);
 els.loadSampleButton.addEventListener("click", loadTrace);
 els.traceButton.addEventListener("click", traceAddress);
@@ -2425,6 +3904,7 @@ els.dustFilterButton.addEventListener("click", toggleDustFilter);
 els.fitButton.addEventListener("click", resetCurrentViewport);
 els.mintSnapshotButton.addEventListener("click", openMintPreview);
 els.closeMintButton.addEventListener("click", closeMintPreview);
+els.generateAiNotesButton.addEventListener("click", generateAiNotesForSnapshot);
 els.downloadReportButton.addEventListener("click", downloadCaseReport);
 els.downloadSnapshotButton.addEventListener("click", downloadSnapshotJson);
 els.uploadWalrusButton.addEventListener("click", uploadCaseToWalrus);
@@ -2437,6 +3917,7 @@ document.addEventListener("keydown", handleKeyboardShortcut);
 
 initializeAuth();
 
+renderMemwalAssistant();
 loadTrace().catch((error) => {
   els.caseTitle.textContent = "Trace unavailable";
   els.flowSummary.textContent = error.message;

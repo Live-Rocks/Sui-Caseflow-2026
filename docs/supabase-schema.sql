@@ -18,6 +18,15 @@ create table if not exists public.snapshot_records (
 create index if not exists snapshot_records_wallet_uploaded_idx
   on public.snapshot_records (wallet_address, uploaded_at desc);
 
+-- Optional MemWal remember metadata. Existing projects can run these ALTERs safely.
+alter table public.snapshot_records add column if not exists memwal_status text not null default 'skipped';
+alter table public.snapshot_records add column if not exists memwal_namespace text;
+alter table public.snapshot_records add column if not exists memwal_job_id text;
+alter table public.snapshot_records add column if not exists memwal_blob_id text;
+alter table public.snapshot_records add column if not exists memwal_error text;
+alter table public.snapshot_records add column if not exists memwal_queued_at timestamptz;
+alter table public.snapshot_records add column if not exists memwal_saved_at timestamptz;
+
 create table if not exists public.analyst_profiles (
   wallet_address text primary key,
   xp_total integer not null default 0,

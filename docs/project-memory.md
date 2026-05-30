@@ -6,7 +6,7 @@ This file preserves the product and implementation context that has accumulated 
 
 Sui CaseFlow is an investigator layer for Sui fund flows. It is not trying to replace block explorers. Explorers expose raw facts; Sui CaseFlow turns those facts into a case workspace with graph tracing, labels, reports, and recoverable snapshots.
 
-The current product direction is a free public observation tool first. Commercialization, pricing, AI summaries, and heavy entity intelligence are deliberately deferred until the core investigation experience is stable.
+The current product direction is a free public observation tool first. Commercialization, pricing, and heavy entity intelligence are deliberately deferred until the core investigation experience is stable. AI notes are allowed, but only as a bounded handoff layer: deterministic graph analysis remains the source of truth, while AI turns structured case artifacts into readable investigation notes.
 
 Core promise:
 
@@ -28,13 +28,21 @@ The app currently supports:
 - Dust / noise filter for tiny or same-transaction clutter.
 - Direction coloring: inbound blue, outbound red, bidirectional summary gold.
 - Case labels such as `hacker`, `intermediate`, `bridge`, `exchange_suspect`, `known_entity`, and `watch`.
-- Flow Details panel with transaction-level evidence and Suivision links.
-- Case Snapshot modal with HTML report and JSON export.
-- Case memory artifact inside snapshot JSON for future Walrus / agent memory workflows.
-- Walrus upload of case package artifacts: report, snapshot, and case memory.
+- Flow Details panel with transaction-level evidence and Suivision links for the selected flow.
+- Case Snapshot modal with HTML report, JSON export, Walrus upload, and optional OpenAI notes generation.
+- Walrus case package artifacts: `report.html`, `snapshot.json`, `case_memory.json`, `case_manifest.json`, `rules_summary.json`, `ai_notes.json`, and `memwal_memory.json`.
+- Case manifest as the artifact index and integrity layer for hashes, metadata, and package references.
+- Rule-based `Investigation Leads` for next investigation steps, stored in case memory and reports.
+- Stop-boundary suggestions: `exchange_suspect` / `known_entity` are verification boundaries, while bridge/protocol/swap flows are inspection points rather than default expand targets.
 - Sui wallet sign-in where wallet address is the user identity.
 - Supabase-backed My Snapshots list for wallet-owned snapshot records.
-- Restore workspace from a saved Walrus snapshot.
+- My Snapshots cards can copy a `Walrus Case ID` and `Snapshot URL` for handoff or debugging.
+- Wallet dropdown includes `Load from Walrus`, which can restore a workspace from a Walrus Case ID or snapshot URL without requiring wallet sign-in.
+- Upload to Walrus can optionally submit the compact `memwal_memory.json` search text to MemWal using app-managed storage and wallet-scoped namespaces.
+- Right-bottom `MemWal Assistant` drawer with Current Case Memory, deterministic Next Action, and Recall Related Cases.
+- Recall Related Cases can build a temporary memory query from the current visible graph; the current case does not need to be uploaded first.
+- Recalled memories come from the currently signed-in wallet’s MemWal namespace and can restore the linked Walrus snapshot.
+- Restore workspace from a saved Walrus snapshot, including embedded AI notes when present.
 - Off-chain Analyst XP / Investigator Reputation with levels in the wallet dropdown.
 - Optional testnet minting flow for snapshot NFT / certificate experiments.
 
@@ -48,6 +56,7 @@ Current stack:
 - Explorer links: Suivision.
 - Persistent snapshot storage: Walrus public publisher / aggregator.
 - Snapshot index: Supabase `snapshot_records` table.
+- Optional recall index: MemWal remember v1, managed by the app through a delegate private key and separated by deterministic wallet namespace hashes.
 - Identity: Sui wallet signature session, stored locally as a short-lived token.
 
 Development ports:
@@ -76,6 +85,10 @@ Important product decisions so far:
 - Keep complete evidence visible through links and transaction details instead of pretending heuristics are perfect.
 - Use Walrus as durable case memory / report storage, not just as a file dump.
 - My Snapshots should restore the investigation workspace, not only open a static report.
+- `exchange_suspect` and `known_entity` are default investigation boundaries, not default expand targets.
+- Bridge, protocol, and swap nodes should be inspected as transition evidence before following service-side noise.
+- AI and rule suggestions should help analysts choose the next lead, not encourage infinite graph expansion.
+- Flow Details should stay focused on the selected flow. Investigation Leads and recall belong in the MemWal Assistant.
 
 ## Walrus / Case Memory Direction
 
@@ -83,20 +96,81 @@ Walrus is positioned as the durable case memory layer.
 
 A Case Snapshot should contain:
 
-- Human-readable HTML report.
-- Machine-readable snapshot JSON.
-- Machine-readable case-memory JSON.
-- Snapshot hash and case memory hash.
-- Links to Walrus artifacts after upload.
+- `report.html`: human-readable report.
+- `snapshot.json`: recoverable visible graph snapshot, including active `aiNotes` when present.
+- `case_memory.json`: machine-readable investigation memory and suggested actions.
+- `case_manifest.json`: package index, metadata, artifact hashes, and integrity references.
+- `rules_summary.json`: deterministic graph analysis used as AI and report input.
+- `ai_notes.json`: rule-generated by default, optionally generated by the OpenAI adapter using the same schema.
+- `memwal_memory.json`: MemWal-ready compact investigation handoff card for future recall. The UI labels this artifact as `MemWal`; internally it keeps the same filename and schema, stores search text and structured metadata, and does not store final Walrus IDs or manifest hashes.
+- MemWal remember v1 sends only the canonical `memwal_memory.search_text` plus compact Walrus restore references and structured hints. It must not send full `snapshot.json`, full `report.html`, full graph JSON, or full transaction lists.
 
-Current restore behavior is visible-snapshot restore: it restores the graph state saved in the snapshot, not the full historical RPC universe. After restore, investigators can continue from restored nodes by expanding addresses again.
+Current restore behavior is visible-snapshot restore: it restores the graph state saved in `snapshot.json`, not the full historical RPC universe. If `snapshot.json` contains embedded `aiNotes`, restored snapshots preserve those notes unless the graph changes. Old snapshots without `aiNotes` remain compatible and fall back to rule-generated notes. After restore, investigators can continue from restored nodes by expanding addresses again.
+
+Current share / restore behavior:
+
+- `Walrus Case ID` is the product-facing name for the internal `record.quilt_id`. It is the compact identifier users can copy from My Snapshots and paste into `Load from Walrus`.
+- `Snapshot URL` is the direct technical URL for reading `snapshot.json`; it is useful for debugging, fallback restore, or handoff before the site has stable case links.
+- `Load from Walrus` accepts either a Walrus Case ID or a snapshot URL and restores the workspace through the existing snapshot restore path.
+- Restore by URL is intentionally restricted to the configured Walrus aggregator host and supported Walrus blob/quilt read paths. The backend must not become an arbitrary URL proxy.
 
 Future Walrus direction:
 
 - Improve report viewing through the app instead of raw browser HTML when useful.
-- Add Load from Walrus / restore by blob or quilt id.
+- Before public deployment, add `APP_PUBLIC_URL` and a `Copy Case Link` flow, likely using `/restore?quiltId=<id>`.
+- Opening a case link should not automatically overwrite the current workspace; it should prompt the user to restore the Walrus case.
 - Potentially support private or encrypted case packages later with Seal.
 - Keep public upload warnings clear because Walrus data is persistent and public in the current flow.
+
+## MemWal Remember v1
+
+MemWal integration is implemented as app-managed storage for the first version. CaseFlow uses one backend-managed MemWal account / delegate private key and separates user memories with deterministic wallet-scoped namespaces:
+
+```text
+sui-caseflow:wallet:<sha256(lowercase_wallet_address).slice(0, 12)>
+```
+
+This is product-level wallet isolation, not a claim that each user cryptographically owns their own MemWal account. Recommended pitch wording:
+
+> CaseFlow manages MemWal storage through an app delegate key and separates user memories by wallet-scoped namespaces.
+
+Upload flow order:
+
+1. Upload the full case package to Walrus.
+2. Create a Supabase `snapshot_record`.
+3. Try MemWal `remember()` with compact memory text.
+4. Update the same `snapshot_record` with MemWal metadata.
+
+MemWal status fields in Supabase are `memwal_status`, `memwal_namespace`, `memwal_job_id`, `memwal_blob_id`, `memwal_error`, `memwal_queued_at`, and `memwal_saved_at`. Missing MemWal env config is treated as `skipped / not_configured`; Walrus upload and My Snapshots still work.
+
+Current `.env` settings:
+
+- `MEMWAL_ACCOUNT_ID`
+- `MEMWAL_DELEGATE_PRIVATE_KEY`
+- `MEMWAL_SERVER_URL`
+- `MEMWAL_NAMESPACE_PREFIX=sui-caseflow`
+
+Recall Related Cases v1 is implemented in the right-bottom `MemWal Assistant` drawer. It is not a free-form chat assistant. The current workspace is used as query material, and the backend recalls up to 10 MemWal memories from the signed-in wallet namespace, reranks them locally, excludes the current case, and returns the top 3 relevant previous memories. Result cards show confidence, match reasons, restore actions, and copy actions for Walrus Case ID / Snapshot URL.
+
+Future MemWal direction:
+
+- Tune memory card quality and recall ranking with more real cases.
+- Add a stronger profile or memory management surface if the drawer becomes crowded.
+- Consider a future Case Assistant Chat after recall quality is stable.
+
+## AI Notes Adapter
+
+Current direction: AI notes are an optional enhancement layer for Case Snapshot, not the core chain-analysis engine. The deterministic graph parser, rules summary, and case memory remain the source of truth.
+
+- Default notes are generated locally from `rules_summary.json` and `case_memory.json`.
+- If `OPENAI_API_KEY` is configured, a signed-in wallet user can manually generate OpenAI notes from the same structured artifacts.
+- The OpenAI adapter must output the same `ai_notes.json` schema and include `source_artifacts` hashes.
+- Prompt v2 produces a concise investigation handoff note: 2-sentence summary, up to 4 observations, 2 hypotheses, 2 open questions, and 2 next steps.
+- Grounded neutral inference is allowed when based on the visible graph and analyst labels. Labels must be phrased as analyst-provided context, such as `analyst-labeled hacker`, not confirmed identity.
+- If OpenAI is unavailable, times out, returns invalid output, or fails safety validation, keep rule-generated notes and do not corrupt the pending snapshot.
+- Notes must describe fund-flow patterns only and must not infer real-world identity, ownership, criminal intent, or legal conclusions.
+- OpenAI settings live in `.env`: `OPENAI_NOTES_MODEL`, `OPENAI_NOTES_MAX_OUTPUT_TOKENS`, `OPENAI_NOTES_TIMEOUT_MS`, and optional `OPENAI_NOTES_REASONING_EFFORT`.
+- `OPENAI_NOTES_REASONING_EFFORT` has no app default. It is sent only when explicitly set in `.env`, because different models support different reasoning effort values.
 
 ## Phase 4: Investigator Reputation
 
@@ -126,12 +200,15 @@ Guiding principle:
 
 Good next steps include:
 
-- Wallet selector modal instead of auto-opening the first detected wallet.
-- Better My Snapshots dropdown / future profile page with snapshots and reputation.
-- Snapshot restore polish and clearer restored-state messaging.
-- Better layout handling for large fan-out graphs and low-value noise.
-- Report viewer improvements for Walrus-hosted HTML.
-- Start Phase 4 reputation only after snapshot restore and wallet UX feel solid.
+- Test AI Notes quality on real cases and tune prompt / rules based on investigator feedback.
+- Tune Investigation Leads stop-boundary and expand heuristics for more cases.
+- Tune MemWal recall ranking, memory card wording, and match-reason quality with more real cases.
+- Add My Snapshots management for growing snapshot lists, such as search, filters, hide/delete local index records, or a profile page.
+- Add optional case version diff so restored cases can compare v1 and v2 investigation states.
+- Improve report viewing through the app instead of raw browser HTML when useful.
+- Add deployment-ready `Copy Case Link` support with `APP_PUBLIC_URL` and a query restore prompt.
+- Consider a future MemWal / AI chat assistant after recall quality is stable.
+- Consider a future provider adapter option for Bedrock or other models after OpenAI notes are stable.
 
 ## Safety Notes
 

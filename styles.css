@@ -58,8 +58,8 @@ button:disabled {
   grid-template-columns: 320px minmax(520px, 1fr) 360px;
   align-items: center;
   gap: 0;
-  min-height: 86px;
-  padding: 18px 20px;
+  min-height: 64px;
+  padding: 10px 20px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.76);
   box-shadow: 0 10px 28px rgba(29, 37, 44, 0.05);
@@ -117,7 +117,7 @@ button:disabled {
 .brand {
   grid-column: 1;
   gap: 12px;
-  min-height: 52px;
+  min-height: 44px;
 }
 
 .brand-mark {
@@ -535,6 +535,19 @@ select {
   background: #fbfcfb;
 }
 
+.suggestion-item {
+  cursor: pointer;
+  background: #fffdf0;
+}
+
+.suggestion-item:hover {
+  border-color: var(--gold);
+}
+
+.suggestion-rationale {
+  color: var(--ink);
+}
+
 .inline-close-button {
   position: absolute;
   top: 8px;
@@ -802,6 +815,42 @@ a.digest-text:hover {
   font-weight: 750;
 }
 
+.walrus-load-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.walrus-load-box label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.walrus-load-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.walrus-load-row input {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.walrus-load-row button {
+  min-height: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
 .snapshot-item {
   width: 100%;
   text-align: left;
@@ -838,6 +887,192 @@ a.digest-text:hover {
   font-weight: 800;
 }
 
+.snapshot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.snapshot-actions button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  text-decoration: underline;
+}
+
+.snapshot-actions button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+
+.memwal-assistant {
+  position: fixed;
+  right: 20px;
+  bottom: 18px;
+  z-index: 45;
+  width: min(420px, calc(100vw - 40px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 42px rgba(29, 37, 44, 0.16);
+  overflow: hidden;
+}
+
+.memwal-assistant-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  appearance: none;
+  border: 0;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 12px 16px;
+  font-weight: 850;
+  text-align: left;
+}
+
+.memwal-assistant-body {
+  display: grid;
+  gap: 12px;
+  max-height: min(520px, calc(100vh - 160px));
+  padding: 14px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.memwal-assistant-body[hidden],
+.memwal-assistant.is-collapsed .memwal-assistant-body {
+  display: none;
+}
+
+.memwal-assistant-copy,
+.memwal-recall-status,
+.memwal-result-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.memwal-current-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0 0;
+}
+
+.memwal-current-meta div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(245, 243, 238, 0.52);
+}
+
+.memwal-current-meta dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.memwal-current-meta dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.memwal-assistant-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.memwal-assistant-actions .primary-button {
+  min-height: 38px;
+  padding: 8px 14px;
+  font-size: 14px;
+}
+
+.memwal-recall-status.success {
+  color: var(--green);
+  font-weight: 800;
+}
+
+.memwal-recall-status.error {
+  color: var(--red);
+  font-weight: 800;
+}
+
+.memwal-recall-results {
+  display: grid;
+  gap: 10px;
+}
+
+.memwal-result-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.memwal-result-card strong {
+  display: block;
+  font-weight: 850;
+}
+
+.memwal-confidence {
+  display: inline-block;
+  margin-top: 4px;
+  border: 1px solid var(--green);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.memwal-match-reasons,
+.memwal-next-action {
+  margin-top: 6px;
+}
+
+.memwal-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.memwal-result-actions button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  text-decoration: underline;
+}
+
+.memwal-result-actions button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
 @media (max-width: 1180px) {
   .app-header,
   .main-grid {
@@ -858,6 +1093,16 @@ a.digest-text:hover {
 }
 
 @media (max-width: 760px) {
+  .memwal-assistant {
+    right: 10px;
+    bottom: 10px;
+    width: calc(100vw - 20px);
+  }
+
+  .memwal-current-meta {
+    grid-template-columns: 1fr;
+  }
+
   body {
     height: auto;
     overflow: auto;

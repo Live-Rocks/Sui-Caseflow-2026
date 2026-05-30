@@ -35,6 +35,13 @@
             </div>
             <div class="snapshot-list-wrap">
               <h3>My Snapshots</h3>
+              <div class="walrus-load-box">
+                <label for="walrusRestoreInput">Load from Walrus</label>
+                <div class="walrus-load-row">
+                  <input id="walrusRestoreInput" type="text" placeholder="Paste Walrus Case ID or snapshot URL">
+                  <button id="walrusRestoreButton" type="button" class="secondary-button">Restore</button>
+                </div>
+              </div>
               <div id="snapshotList" class="snapshot-list">Connect wallet to load snapshots.</div>
             </div>
             <button id="signOutButton" type="button" class="secondary-button wallet-signout-button">Sign out</button>
@@ -122,6 +129,38 @@
         </section>
         </aside>
       </div>
+
+      <section id="memwalAssistant" class="memwal-assistant is-collapsed" aria-label="MemWal Assistant">
+        <button id="memwalAssistantToggle" class="memwal-assistant-toggle" type="button" aria-expanded="false">
+          <span>MemWal Assistant</span>
+          <span id="memwalAssistantIcon" aria-hidden="true">▴</span>
+        </button>
+        <div id="memwalAssistantBody" class="memwal-assistant-body" hidden>
+          <div class="memwal-assistant-section">
+            <p class="eyebrow">Current Case Memory</p>
+            <p id="memwalCurrentSummary" class="memwal-assistant-copy">Start a trace or restore a snapshot to recall related memories.</p>
+            <dl class="memwal-current-meta">
+              <div>
+                <dt>Root</dt>
+                <dd id="memwalCurrentRoot">No case</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd id="memwalCurrentStatus">No memory card</dd>
+              </div>
+              <div>
+                <dt>Next action</dt>
+                <dd id="memwalCurrentNext">None</dd>
+              </div>
+            </dl>
+          </div>
+          <div class="memwal-assistant-actions">
+            <button id="memwalRecallButton" class="primary-button" type="button">Recall Related Cases</button>
+          </div>
+          <p id="memwalRecallStatus" class="memwal-recall-status"></p>
+          <div id="memwalRecallResults" class="memwal-recall-results"></div>
+        </div>
+      </section>
     </div>
 
     <dialog id="mintDialog" class="mint-dialog">
@@ -148,6 +187,7 @@
         </dl>
         <p id="mintStatus" class="mint-status"></p>
         <div class="mint-actions">
+          <button id="generateAiNotesButton" type="button" class="secondary-button">Generate AI Notes</button>
           <button id="downloadReportButton" type="button" class="secondary-button">Download Report</button>
           <button id="downloadSnapshotButton" type="button" class="secondary-button">Download JSON</button>
           <button id="uploadWalrusButton" type="button" class="secondary-button">Upload to Walrus</button>
