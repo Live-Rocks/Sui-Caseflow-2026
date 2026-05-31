@@ -1,6 +1,6 @@
 const SAMPLE_ADDRESS = "0x27bc7a3c4f406cfa91551c32490ad7f5029414578c0649ab4ddbd232e76ef44e";
 const EXPLORER_BASE_URL = "https://suivision.xyz";
-const LABELS = ["hacker", "intermediate", "bridge", "exchange_suspect", "known_entity", "watch"];
+const LABELS = ["hacker", "funder", "intermediate", "bridge", "exchange_suspect", "known_entity", "watch"];
 const MAX_UNDO_STEPS = 20;
 const SUI_COIN_TYPE = "0x2::sui::SUI";
 const DUST_SUI_THRESHOLD = 20_000_000n;
@@ -23,7 +23,8 @@ let reputationProfile = null;
 let lastXpMessage = "";
 let walletDropdownOpen = false;
 let memwalAssistantOpen = false;
-let memwalRecallResults = [];
+let memwalChatMessages = [];
+let memwalChatMessageId = 0;
 let currentWalrusCaseId = "";
 let currentSnapshotUrl = "";
 let currentSnapshotHash = "";
@@ -94,12 +95,13 @@ const els = {
   memwalAssistantIcon: document.querySelector("#memwalAssistantIcon"),
   memwalAssistantBody: document.querySelector("#memwalAssistantBody"),
   memwalCurrentSummary: document.querySelector("#memwalCurrentSummary"),
-  memwalCurrentRoot: document.querySelector("#memwalCurrentRoot"),
-  memwalCurrentStatus: document.querySelector("#memwalCurrentStatus"),
   memwalCurrentNext: document.querySelector("#memwalCurrentNext"),
-  memwalRecallButton: document.querySelector("#memwalRecallButton"),
   memwalRecallStatus: document.querySelector("#memwalRecallStatus"),
-  memwalRecallResults: document.querySelector("#memwalRecallResults"),
+  memwalChatTimeline: document.querySelector("#memwalChatTimeline"),
+  memwalAskForm: document.querySelector("#memwalAskForm"),
+  memwalAskInput: document.querySelector("#memwalAskInput"),
+  memwalAskButton: document.querySelector("#memwalAskButton"),
+  memwalAskStatus: document.querySelector("#memwalAskStatus"),
 };
 
 function shortAddress(address) {
@@ -212,6 +214,12 @@ function memwalAssistantStatus(message, state = "") {
   els.memwalRecallStatus.className = `memwal-recall-status ${state}`.trim();
 }
 
+function memwalAskStatus(message, state = "") {
+  if (!els.memwalAskStatus) return;
+  els.memwalAskStatus.textContent = message;
+  els.memwalAskStatus.className = `memwal-recall-status ${state}`.trim();
+}
+
 function setMemwalAssistantOpen(open) {
   memwalAssistantOpen = Boolean(open);
   if (!els.memwalAssistant) return;
@@ -237,106 +245,274 @@ function recallBoundaryLabel(boundary) {
   return `${boundary.address_short || shortAddress(boundary.address || "boundary")} (${boundary.boundary_type || "boundary"})`;
 }
 
+function memwalInputDisabledReason() {
+  if (!trace?.graphSnapshot) return "Start a trace or restore a snapshot before asking MemWal.";
+  if (!authSession?.token) return "Connect Wallet to ask MemWal.";
+  return "";
+}
+
+function clearMemwalChatTimeline() {
+  memwalChatMessages = [];
+  memwalChatMessageId = 0;
+}
+
+function appendMemwalChatMessage(message) {
+  const item = { id: ++memwalChatMessageId, ...message };
+  memwalChatMessages.push(item);
+  renderMemwalChatTimeline();
+  return item.id;
+}
+
+function updateMemwalChatMessage(id, patch) {
+  const index = memwalChatMessages.findIndex((message) => message.id === id);
+  if (index < 0) return;
+  memwalChatMessages[index] = { ...memwalChatMessages[index], ...patch };
+  renderMemwalChatTimeline();
+}
+
 function renderMemwalAssistant() {
   if (!els.memwalAssistant) return;
   const hasCase = Boolean(trace?.graphSnapshot);
-  els.memwalRecallButton.disabled = !hasCase || !authSession?.token;
+  const disabledReason = memwalInputDisabledReason();
+  if (els.memwalAskButton) els.memwalAskButton.disabled = Boolean(disabledReason);
+  for (const button of document.querySelectorAll("[data-memwal-prompt]")) {
+    button.disabled = Boolean(disabledReason);
+  }
+
   if (!hasCase) {
-    els.memwalCurrentSummary.textContent = "Start a trace or restore a snapshot to recall related memories.";
-    els.memwalCurrentRoot.textContent = "No case";
-    els.memwalCurrentStatus.textContent = "No memory card";
-    els.memwalCurrentNext.textContent = "None";
-    if (!els.memwalRecallStatus.textContent) memwalAssistantStatus("Start a trace or restore a snapshot to recall related memories.");
-    renderMemwalRecallResults();
+    els.memwalCurrentSummary.textContent = "No active case. Start a trace or restore a snapshot.";
+    els.memwalCurrentNext.textContent = "Next: none";
+    memwalAssistantStatus("");
+    memwalAskStatus("Start a trace or restore a snapshot before asking MemWal.", "error");
+    renderMemwalChatTimeline();
     return;
   }
 
   const actions = currentMemoryAgentActions(trace.graphSnapshot);
   const topAction = actions.find((action) => action.priority === "high") || actions[0] || null;
-  els.memwalCurrentRoot.textContent = shortAddress(trace.seedAddress || trace.graphSnapshot.seedAddress || "");
-  els.memwalCurrentStatus.textContent = currentMemwalStatusLabel();
-  els.memwalCurrentNext.textContent = topAction?.title || "Review current investigation leads";
-  els.memwalCurrentSummary.textContent = "Current case memory is generated from this workspace and used as recall query material. Recalled memories come from MemWal.";
+  const root = shortAddress(trace.seedAddress || trace.graphSnapshot.seedAddress || "");
+  els.memwalCurrentSummary.textContent = `Current case · ${root} · Ready · ${currentMemwalStatusLabel()}`;
+  els.memwalCurrentNext.textContent = `Next: ${topAction?.title || "Review current investigation leads"}`;
 
-  if (!authSession?.token && !els.memwalRecallStatus.textContent) {
-    memwalAssistantStatus("Connect Wallet to recall your MemWal memories.");
-  } else if (!els.memwalRecallStatus.textContent) {
-    memwalAssistantStatus("Ready to recall related memories.");
-  }
-  renderMemwalRecallResults();
+  memwalAssistantStatus("");
+  memwalAskStatus(disabledReason, disabledReason ? "error" : "");
+  renderMemwalChatTimeline();
 }
 
 function confidenceLabel(score) {
   return score >= 70 ? "High match" : "Medium match";
 }
 
-function restoreRecallResult(result) {
-  const source = result.snapshotUrl || result.walrusCaseId || "";
-  if (!source) return;
-  els.walrusRestoreInput.value = source;
+function restoreMemwalSource(source) {
+  const value = source?.snapshotUrl || source?.walrusCaseId || "";
+  if (!value) return;
+  els.walrusRestoreInput.value = value;
   void restoreWalrusInput();
 }
 
-function renderMemwalRecallResults() {
-  if (!els.memwalRecallResults) return;
-  els.memwalRecallResults.innerHTML = "";
-  if (!memwalRecallResults.length) return;
+function appendMemwalSourceActions(parent, source) {
+  if (!source?.walrusCaseId && !source?.snapshotUrl) return;
+  const actions = document.createElement("div");
+  actions.className = "memwal-result-actions";
 
-  for (const result of memwalRecallResults) {
-    const item = document.createElement("article");
-    item.className = "memwal-result-card";
+  const restoreButton = document.createElement("button");
+  restoreButton.type = "button";
+  restoreButton.textContent = "Restore";
+  restoreButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    restoreMemwalSource(source);
+  });
+  actions.append(restoreButton);
 
+  const copyCaseButton = document.createElement("button");
+  copyCaseButton.type = "button";
+  copyCaseButton.textContent = "Copy Case ID";
+  copyCaseButton.disabled = !source.walrusCaseId;
+  copyCaseButton.addEventListener("click", (event) => {
+    void copySnapshotValue(event, source.walrusCaseId, "Walrus Case ID copied.");
+  });
+
+  const copySnapshotButton = document.createElement("button");
+  copySnapshotButton.type = "button";
+  copySnapshotButton.textContent = "Copy Snapshot URL";
+  copySnapshotButton.disabled = !source.snapshotUrl;
+  copySnapshotButton.addEventListener("click", (event) => {
+    void copySnapshotValue(event, source.snapshotUrl, "Snapshot URL copied.");
+  });
+
+  actions.append(copyCaseButton, copySnapshotButton);
+  parent.append(actions);
+}
+
+function splitDecimalSafeSentences(text) {
+  const sentences = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (![".", "!", "?"].includes(char)) continue;
+    if (char === "." && /\d/.test(text[index - 1] || "") && /\d/.test(text[index + 1] || "")) continue;
+    const rest = text.slice(index + 1);
+    const match = rest.match(/^(?:["')\]]+)?\s+/);
+    if (!match) continue;
+    const next = text[index + 1 + match[0].length] || "";
+    if (next && !/[A-Z0-9"'“‘]/.test(next)) continue;
+    sentences.push(text.slice(start, index + 1).trim());
+    start = index + 1 + match[0].length;
+  }
+  const tail = text.slice(start).trim();
+  if (tail) sentences.push(tail);
+  return sentences.filter(Boolean);
+}
+
+function splitAskAnswerParagraphs(text) {
+  const normalized = String(text || "No answer returned.").replace(/\r\n/g, "\n").trim();
+  if (!normalized) return ["No answer returned."];
+  const explicit = normalized.split(/\n\s*\n+/).map((part) => part.trim()).filter(Boolean);
+  if (explicit.length > 1) return explicit.slice(0, 3);
+
+  const transitionMatch = normalized.match(/\s+(Also,|However,|In recalled memory,|That label\b|If you are checking memory history,)/);
+  if (transitionMatch && transitionMatch.index && transitionMatch.index > 40) {
+    const first = normalized.slice(0, transitionMatch.index).trim();
+    const second = normalized.slice(transitionMatch.index).trim();
+    if (first && second) return [first, second];
+  }
+
+  const sentences = splitDecimalSafeSentences(normalized);
+  if (sentences.length <= 2) return [normalized];
+  const splitAt = Math.ceil(sentences.length / 2);
+  return [sentences.slice(0, splitAt).join(" "), sentences.slice(splitAt).join(" ")].filter(Boolean);
+}
+
+function renderAskAnswerParagraphs(answer) {
+  const container = document.createElement("div");
+  container.className = "memwal-ask-answer-paragraphs";
+  for (const paragraph of splitAskAnswerParagraphs(answer)) {
+    const p = document.createElement("p");
+    p.className = "memwal-ask-answer-text";
+    p.textContent = paragraph;
+    container.append(p);
+  }
+  return container;
+}
+
+function renderMemoryResultBubble(message, bubble) {
+  const results = message.results || [];
+  if (message.status === "loading") {
+    bubble.textContent = message.text || "Recalling related memories...";
+    return;
+  }
+  if (message.status === "error") {
+    bubble.textContent = message.error || "MemWal recall failed.";
+    bubble.classList.add("is-error");
+    return;
+  }
+  if (!results.length) {
     const title = document.createElement("strong");
-    title.textContent = result.rootAddressShort || result.walrusCaseIdShort || "Related memory";
+    title.textContent = "No strong related memory found.";
+    const detail = document.createElement("p");
+    detail.textContent = "MemWal did not find a recalled memory with the same address or a meaningful analyst-label match.";
+    bubble.append(title, detail);
+    return;
+  }
 
-    const confidence = document.createElement("span");
-    confidence.className = "memwal-confidence";
-    confidence.textContent = result.confidence || confidenceLabel(Number(result.score || 0));
+  const result = results[0];
+  const title = document.createElement("strong");
+  title.textContent = result.rootAddressShort || result.walrusCaseIdShort || "Strongest related memory";
 
-    const summary = document.createElement("p");
-    summary.textContent = result.summary || "No summary available.";
+  const confidence = document.createElement("span");
+  confidence.className = "memwal-confidence";
+  confidence.textContent = result.confidence || confidenceLabel(Number(result.score || 0));
 
-    const reasons = document.createElement("p");
-    reasons.className = "memwal-match-reasons";
-    reasons.textContent = (result.matchReasons || []).length ? `Match: ${result.matchReasons.join(" · ")}` : "Match: related memory";
+  const summary = document.createElement("p");
+  summary.textContent = result.summary || "No summary available.";
 
-    const next = document.createElement("p");
-    next.className = "memwal-next-action";
-    next.textContent = result.nextBestAction ? `Next: ${result.nextBestAction}` : "Next: review restored case memory";
+  const reasons = document.createElement("p");
+  reasons.className = "memwal-match-reasons";
+  reasons.textContent = (result.matchReasons || []).length ? `Match: ${result.matchReasons.join(" · ")}` : "Match: related memory";
 
-    const actions = document.createElement("div");
-    actions.className = "memwal-result-actions";
+  const notice = document.createElement("p");
+  notice.className = "memwal-match-reasons";
+  notice.textContent = result.referenceNotice || "";
 
-    if (result.walrusCaseId || result.snapshotUrl) {
-      const restoreButton = document.createElement("button");
-      restoreButton.type = "button";
-      restoreButton.textContent = "Restore";
-      restoreButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        restoreRecallResult(result);
-      });
-      actions.append(restoreButton);
+  const next = document.createElement("p");
+  next.className = "memwal-next-action";
+  next.textContent = result.nextBestAction ? `Next: ${result.nextBestAction}` : "Next: review restored case memory";
+
+  bubble.append(title, confidence, summary, reasons);
+  if (result.referenceNotice) bubble.append(notice);
+  bubble.append(next);
+  appendMemwalSourceActions(bubble, result);
+}
+
+function renderAskAnswerBubble(message, bubble) {
+  if (message.status === "loading") {
+    bubble.textContent = message.text || "Recalling MemWal memories, preparing a grounded AI answer...";
+    return;
+  }
+  if (message.status === "error") {
+    bubble.textContent = message.error || "Ask MemWal failed.";
+    bubble.classList.add("is-error");
+    return;
+  }
+
+  const answerText = renderAskAnswerParagraphs(message.answer?.answer || "No answer returned.");
+
+  const meta = document.createElement("p");
+  meta.className = "memwal-ask-meta";
+  meta.textContent = `Confidence: ${message.answer?.confidence || "low"}`;
+
+  const chips = document.createElement("div");
+  chips.className = "memwal-source-chips";
+  for (const source of message.sources || []) {
+    const chip = document.createElement("span");
+    chip.className = "memwal-source-chip";
+    chip.textContent = source.label || source.type || "Source";
+    chips.append(chip);
+  }
+
+  const caution = document.createElement("p");
+  caution.className = "memwal-ask-caution";
+  caution.textContent = message.answer?.caution || "Answers are based only on current case memory and recalled MemWal memories.";
+
+  bubble.append(answerText, meta, chips, caution);
+  for (const source of message.sources || []) appendMemwalSourceActions(bubble, source);
+}
+
+function renderMemwalChatTimeline() {
+  if (!els.memwalChatTimeline) return;
+  els.memwalChatTimeline.innerHTML = "";
+  if (!memwalChatMessages.length) return;
+
+  const lastIndex = memwalChatMessages.length - 1;
+  const lastMessage = memwalChatMessages[lastIndex];
+  const focusUserIndex = lastMessage?.role === "assistant" && lastMessage.status !== "loading" && memwalChatMessages[lastIndex - 1]?.role === "user"
+    ? lastIndex - 1
+    : -1;
+  let focusRow = null;
+
+  for (const [index, message] of memwalChatMessages.entries()) {
+    const row = document.createElement("div");
+    row.className = `memwal-chat-row is-${message.role}`;
+    const bubble = document.createElement("article");
+    bubble.className = `memwal-chat-bubble is-${message.role}`;
+
+    if (message.role === "user") {
+      bubble.textContent = message.text || "";
+    } else if (message.kind === "memory_result") {
+      renderMemoryResultBubble(message, bubble);
+    } else {
+      renderAskAnswerBubble(message, bubble);
     }
 
-    const copyCaseButton = document.createElement("button");
-    copyCaseButton.type = "button";
-    copyCaseButton.textContent = "Copy Case ID";
-    copyCaseButton.disabled = !result.walrusCaseId;
-    copyCaseButton.addEventListener("click", (event) => {
-      void copySnapshotValue(event, result.walrusCaseId, "Walrus Case ID copied.");
-    });
+    row.append(bubble);
+    els.memwalChatTimeline.append(row);
+    if (index === focusUserIndex) focusRow = row;
+  }
 
-    const copySnapshotButton = document.createElement("button");
-    copySnapshotButton.type = "button";
-    copySnapshotButton.textContent = "Copy Snapshot URL";
-    copySnapshotButton.disabled = !result.snapshotUrl;
-    copySnapshotButton.addEventListener("click", (event) => {
-      void copySnapshotValue(event, result.snapshotUrl, "Snapshot URL copied.");
-    });
-
-    actions.append(copyCaseButton, copySnapshotButton);
-    item.append(title, confidence, summary, reasons, next, actions);
-    els.memwalRecallResults.append(item);
+  if (focusRow) {
+    els.memwalChatTimeline.scrollTop = Math.max(0, focusRow.offsetTop - els.memwalChatTimeline.offsetTop);
+  } else {
+    els.memwalChatTimeline.scrollTop = els.memwalChatTimeline.scrollHeight;
   }
 }
 
@@ -353,23 +529,31 @@ function compactMemwalQuery(bundle) {
     nextActionType: memory.metadata?.next_action_type || "",
     nextBestAction: memory.next_best_action || null,
     traceBoundaries: memory.trace_boundaries || [],
+    visibleNodes: memory.metadata?.visible_nodes || [],
+    labeledNodes: memory.metadata?.labeled_nodes || [],
   };
 }
 
-async function recallRelatedCases() {
+async function recallStrongestMemory(question = "What is the strongest related memory?") {
   if (!trace?.graphSnapshot) {
-    memwalAssistantStatus("Start a trace or restore a snapshot to recall related memories.", "error");
+    memwalAskStatus("Start a trace or restore a snapshot before asking MemWal.", "error");
     renderMemwalAssistant();
     return;
   }
   if (!authSession?.token) {
-    memwalAssistantStatus("Connect Wallet to recall your MemWal memories.", "error");
+    memwalAskStatus("Connect Wallet to ask MemWal.", "error");
     renderMemwalAssistant();
     return;
   }
 
-  els.memwalRecallButton.disabled = true;
-  memwalAssistantStatus("Building current case memory and recalling related cases...");
+  appendMemwalChatMessage({ role: "user", text: question });
+  const assistantId = appendMemwalChatMessage({
+    role: "assistant",
+    kind: "memory_result",
+    status: "loading",
+    text: "Recalling the strongest related MemWal memory...",
+  });
+  memwalAskStatus("Recalling related MemWal memories...");
   try {
     const bundle = await createEvidenceSnapshot();
     const response = await fetch("/api/memwal/recall", {
@@ -379,19 +563,75 @@ async function recallRelatedCases() {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "MemWal recall failed.");
-    memwalRecallResults = result.results || [];
-    if (result.status === "skipped") {
-      memwalAssistantStatus("MemWal is not configured on this server.", "error");
-    } else if (!memwalRecallResults.length) {
-      memwalAssistantStatus(result.message || "No other related memories found yet.");
-    } else {
-      memwalAssistantStatus(`Found ${memwalRecallResults.length} related memor${memwalRecallResults.length === 1 ? "y" : "ies"}.`, "success");
-    }
-    renderMemwalAssistant();
+    const results = result.results || [];
+    const statusText = result.status === "skipped"
+      ? "MemWal is not configured on this server."
+      : results.length
+        ? "Found " + results.length + " related memor" + (results.length === 1 ? "y" : "ies") + "."
+        : (result.message || "No strong related memory found.");
+    updateMemwalChatMessage(assistantId, {
+      status: result.status === "skipped" ? "error" : "done",
+      text: statusText,
+      results,
+      error: result.status === "skipped" ? statusText : "",
+    });
+    memwalAskStatus(statusText, result.status === "skipped" ? "error" : results.length ? "success" : "");
   } catch (error) {
-    memwalAssistantStatus(error.message || "MemWal recall failed.", "error");
+    updateMemwalChatMessage(assistantId, { status: "error", error: error.message || "MemWal recall failed." });
+    memwalAskStatus(error.message || "MemWal recall failed.", "error");
   } finally {
-    els.memwalRecallButton.disabled = !trace?.graphSnapshot || !authSession?.token;
+    renderMemwalAssistant();
+  }
+}
+
+async function askMemwal(questionOverride = "") {
+  const question = String(questionOverride || els.memwalAskInput?.value || "").trim();
+  if (!trace?.graphSnapshot) {
+    memwalAskStatus("Start a trace or restore a snapshot before asking MemWal.", "error");
+    renderMemwalAssistant();
+    return;
+  }
+  if (!authSession?.token) {
+    memwalAskStatus("Connect Wallet to ask MemWal.", "error");
+    renderMemwalAssistant();
+    return;
+  }
+  if (!question) {
+    memwalAskStatus("Type a question for Ask MemWal.", "error");
+    return;
+  }
+
+  appendMemwalChatMessage({ role: "user", text: question });
+  const assistantId = appendMemwalChatMessage({
+    role: "assistant",
+    kind: "ask_answer",
+    status: "loading",
+    text: "Recalling MemWal memories, preparing a grounded AI answer...",
+  });
+  els.memwalAskButton.disabled = true;
+  if (els.memwalAskInput) els.memwalAskInput.value = "";
+  memwalAskStatus("Recalling MemWal memories, preparing a grounded AI answer...");
+  try {
+    const bundle = await createEvidenceSnapshot();
+    const response = await fetch("/api/memwal/ask", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ question, ...compactMemwalQuery(bundle) }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Ask MemWal failed.");
+    updateMemwalChatMessage(assistantId, {
+      status: "done",
+      answer: result.answer,
+      sources: result.sources || [],
+    });
+    memwalAskStatus(result.message || "Ask MemWal answered from current case memory.", result.status === "refused" ? "error" : "success");
+  } catch (error) {
+    updateMemwalChatMessage(assistantId, { status: "error", error: error.message || "Ask MemWal failed." });
+    memwalAskStatus(error.message || "Ask MemWal failed.", "error");
+  } finally {
+    els.memwalAskButton.disabled = Boolean(memwalInputDisabledReason());
+    renderMemwalAssistant();
   }
 }
 
@@ -651,6 +891,7 @@ function restoreCaseSnapshot(snapshot, record = {}) {
   const edges = snapshot.flows.flatMap((flow, flowIndex) => snapshotFlowToEdges(flow, flowIndex * 1000));
   const transactions = snapshotTransactions(edges);
 
+  clearMemwalChatTimeline();
   trace = {
     seedAddress,
     txCount: transactions.length,
@@ -714,7 +955,7 @@ function renderSnapshotList() {
     return;
   }
   if (!mySnapshots.length) {
-    els.snapshotList.textContent = "No saved snapshots yet.";
+    els.snapshotList.textContent = "No active snapshots yet.";
     return;
   }
 
@@ -1149,7 +1390,6 @@ function invalidateCaseMemoryRefs() {
   restoredSuggestedActions = [];
   clearRestoredAiNotes();
   clearCurrentWalrusRefs();
-  memwalRecallResults = [];
   renderMemwalAssistant();
 }
 
@@ -1244,6 +1484,7 @@ async function loadTrace() {
   const response = await fetch("./data/sample-trace.json");
   if (!response.ok) throw new Error("Could not load sample trace");
   trace = await response.json();
+  clearMemwalChatTimeline();
   selectedNodeId = trace.seedAddress;
   selectedFlowKey = null;
   invalidateCaseMemoryRefs();
@@ -1271,6 +1512,7 @@ async function traceAddress() {
     if (!response.ok) throw new Error(payload.error || "Trace failed");
 
     trace = payload;
+    clearMemwalChatTimeline();
     selectedNodeId = trace.seedAddress;
     selectedFlowKey = null;
     invalidateCaseMemoryRefs();
@@ -2427,7 +2669,7 @@ function memoryAgentActionsForGraph(graph, displayEdges = null, visibleNodes = n
     ));
   }
 
-  const importantLabels = nodes.flatMap((node) => nodeLabels(node)).filter((label) => ["hacker", "exchange_suspect", "known_entity", "known_exchange", "bridge", "bridge_contract"].includes(label));
+  const importantLabels = nodes.flatMap((node) => nodeLabels(node)).filter((label) => ["hacker", "funder", "exchange_suspect", "known_entity", "known_exchange", "bridge", "bridge_contract"].includes(label));
   if (importantLabels.length > 0) {
     add(memoryAction(
       "export:case-memory",
@@ -2713,6 +2955,11 @@ function rulesSummaryForGraph({ graph, visibleNodes, rawVisibleEdges, displayEdg
       source_tx_count: trace?.txCount || graph.timeline?.length || 0,
       dust_filter_enabled: dustFilterEnabled,
     },
+    visible_nodes: visibleNodes.map((node) => ({
+      address: node.address || node.id,
+      shortAddress: node.shortAddress || shortAddress(node.address || node.id),
+      labels: node.labels || [],
+    })).slice(0, 40),
     important_nodes: importantNodes,
     important_flows: importantFlows,
     patterns,
@@ -2752,6 +2999,53 @@ function memwalImportantNodes(rulesSummary, limit = 6) {
     metrics: node.metrics || {},
     evidence: node.evidence || {},
   }));
+}
+
+function memwalVisibleNodes(rulesSummary, caseMemory, nextAction = null, limit = 50) {
+  const seedAddress = rulesSummary?.seedAddress || caseMemory?.seedAddress || "";
+  const targetNodeId = nextAction?.targetNodeId || "";
+  const importantAddresses = new Set((rulesSummary?.important_nodes || []).map((node) => node.address).filter(Boolean));
+  const labeledAddresses = new Set([
+    ...(rulesSummary?.analyst_labels || []),
+    ...(caseMemory?.labels || []),
+  ].map((node) => node.address || node.id).filter(Boolean));
+  return (rulesSummary?.visible_nodes || [])
+    .map((node, index) => ({
+      address: node.address,
+      address_short: node.shortAddress || node.address_short || shortAddress(node.address),
+      labels: node.labels || [],
+      index,
+      priority: (labeledAddresses.has(node.address) ? 1000 : 0)
+        + (node.address === seedAddress ? 900 : 0)
+        + (node.address === targetNodeId ? 800 : 0)
+        + (importantAddresses.has(node.address) ? 500 : 0),
+    }))
+    .filter((node) => node.address)
+    .sort((a, b) => b.priority - a.priority || a.index - b.index)
+    .slice(0, limit)
+    .map(({ index, priority, ...node }) => node);
+}
+
+function memwalLabeledNodes(rulesSummary, caseMemory, limit = 20) {
+  const nodes = [
+    ...(rulesSummary?.analyst_labels || []),
+    ...(caseMemory?.labels || []),
+  ];
+  const byAddress = new Map();
+  for (const node of nodes) {
+    const address = node.address || node.id;
+    if (!address) continue;
+    const existing = byAddress.get(address) || {
+      address,
+      address_short: node.shortAddress || node.address_short || shortAddress(address),
+      labels: [],
+    };
+    existing.labels = uniqueList([...(existing.labels || []), ...(node.labels || [])]);
+    byAddress.set(address, existing);
+  }
+  return Array.from(byAddress.values())
+    .filter((node) => node.labels.length > 0)
+    .slice(0, limit);
 }
 
 function memwalTraceBoundaries(rulesSummary) {
@@ -2831,6 +3125,8 @@ function memwalMemoryCardForBundle(bundle) {
   const boundaries = memwalTraceBoundaries(rulesSummary);
   const nextAction = topSuggestedAction(caseMemory) || (rulesSummary.suggested_next_actions || [])[0] || null;
   const importantNodes = memwalImportantNodes(rulesSummary);
+  const visibleNodes = memwalVisibleNodes(rulesSummary, caseMemory, nextAction);
+  const labeledNodes = memwalLabeledNodes(rulesSummary, caseMemory);
   const labels = uniqueList((rulesSummary.analyst_labels || []).flatMap((node) => node.labels || []));
   const summary = firstUsefulAiText(aiNotes, "plain_language_summary")
     || `Visible Sui fund-flow case for seed ${shortAddress(rulesSummary.seedAddress || caseMemory.seedAddress || "")}.`;
@@ -2879,6 +3175,8 @@ function memwalMemoryCardForBundle(bundle) {
       tokens: memwalTokenSymbols(rulesSummary),
       pattern_types: memwalPatternTypes(rulesSummary),
       boundary_types: uniqueList(boundaries.map((boundary) => boundary.boundary_type)),
+      visible_nodes: visibleNodes,
+      labeled_nodes: labeledNodes,
       important_nodes: importantNodes,
       tx_digests: txDigests,
       visible_counts: {
@@ -3707,6 +4005,28 @@ function downloadSnapshotJson() {
   downloadTextFile(snapshotDownloadName("json"), pendingSnapshot.snapshotJson, "application/json;charset=utf-8");
 }
 
+function readableClientError(error, fallback = "Request failed.") {
+  if (!error) return fallback;
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message || fallback;
+  if (typeof error === "object") {
+    const parts = [];
+    for (const key of ["message", "details", "hint", "code", "error"]) {
+      const value = error[key];
+      if (!value) continue;
+      parts.push(typeof value === "string" ? value : readableClientError(value, ""));
+    }
+    const readable = parts.filter(Boolean).join(" · ");
+    if (readable) return readable;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return fallback;
+    }
+  }
+  return String(error);
+}
+
 function walrusLink(label, href) {
   const link = document.createElement("a");
   link.href = href;
@@ -3777,7 +4097,7 @@ async function uploadCaseToWalrus() {
       }),
     });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "Walrus upload failed.");
+    if (!response.ok) throw new Error(readableClientError(result.error, "Walrus upload failed."));
 
     setMintStatus("", "success");
     els.mintStatus.append(`Uploaded to Walrus quilt ${shortAddress(result.quiltId)} · `);
@@ -3818,7 +4138,7 @@ async function uploadCaseToWalrus() {
       txCount: pendingSnapshot.snapshot.txDigests.length,
     });
   } catch (error) {
-    setMintStatus(error.message, "error");
+    setMintStatus(readableClientError(error, "Walrus upload failed."), "error");
   } finally {
     els.uploadWalrusButton.disabled = false;
   }
@@ -3887,7 +4207,22 @@ function handleKeyboardShortcut(event) {
 els.walletButton.addEventListener("click", toggleWalletMenu);
 els.signOutButton.addEventListener("click", signOutWallet);
 els.memwalAssistantToggle.addEventListener("click", () => setMemwalAssistantOpen(!memwalAssistantOpen));
-els.memwalRecallButton.addEventListener("click", () => { void recallRelatedCases(); });
+els.memwalAskForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void askMemwal();
+});
+for (const button of document.querySelectorAll("[data-memwal-prompt]")) {
+  button.addEventListener("click", () => {
+    const prompt = button.getAttribute("data-memwal-prompt") || "";
+    const mode = button.getAttribute("data-memwal-mode") || "ask";
+    if (els.memwalAskInput) els.memwalAskInput.value = "";
+    if (mode === "recall") {
+      void recallStrongestMemory(prompt);
+    } else {
+      void askMemwal(prompt);
+    }
+  });
+}
 els.walrusRestoreButton.addEventListener("click", restoreWalrusInput);
 els.walrusRestoreInput.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;

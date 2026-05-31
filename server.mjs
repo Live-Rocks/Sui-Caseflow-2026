@@ -31,13 +31,20 @@ const port = Number(process.env.PORT || 5173);
 const walrusPublisherUrl = process.env.WALRUS_PUBLISHER_URL || "https://publisher.walrus-testnet.walrus.space";
 const walrusAggregatorUrl = process.env.WALRUS_AGGREGATOR_URL || "https://aggregator.walrus-testnet.walrus.space";
 const walrusEpochs = Number(process.env.WALRUS_EPOCHS || 5);
+const walrusEpochDaysMs = 24 * 60 * 60 * 1000;
 const maxCaseUploadBytes = 10 * 1024 * 1024;
 const maxAiNotesBytes = 200 * 1024;
+const maxMemWalAskBytes = 64 * 1024;
+const maxMemWalAskQuestionChars = 1000;
 const openaiApiKey = process.env.OPENAI_API_KEY || "";
 const openaiNotesModel = process.env.OPENAI_NOTES_MODEL || "gpt-5-nano";
 const openaiNotesTimeoutMs = Number(process.env.OPENAI_NOTES_TIMEOUT_MS || 20_000);
 const openaiNotesMaxOutputTokens = Math.max(300, Math.min(4000, Number(process.env.OPENAI_NOTES_MAX_OUTPUT_TOKENS || 1200)));
 const openaiNotesReasoningEffort = process.env.OPENAI_NOTES_REASONING_EFFORT || "";
+const openaiAskModel = process.env.OPENAI_ASK_MODEL || openaiNotesModel;
+const openaiAskTimeoutMs = Number(process.env.OPENAI_ASK_TIMEOUT_MS || openaiNotesTimeoutMs || 20_000);
+const openaiAskMaxOutputTokens = Math.max(200, Math.min(2000, Number(process.env.OPENAI_ASK_MAX_OUTPUT_TOKENS || 700)));
+const openaiAskReasoningEffort = process.env.OPENAI_ASK_REASONING_EFFORT || openaiNotesReasoningEffort;
 const authNonceTtlMs = 5 * 60 * 1000;
 const sessionTtlMs = 7 * 24 * 60 * 60 * 1000;
 const sessionSecret = process.env.SESSION_SECRET || "dev-caseflow-session-secret-change-me";
@@ -145,6 +152,29 @@ function supabaseConfigured() {
   return Boolean(supabaseUrl && supabaseServiceRoleKey);
 }
 
+function formatErrorMessage(error, fallback = "Unknown error.") {
+  if (!error) return fallback;
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message || fallback;
+  if (typeof error === "object") {
+    const parts = [];
+    for (const key of ["message", "details", "hint", "code", "error"]) {
+      const value = error[key];
+      if (!value) continue;
+      if (typeof value === "string") parts.push(value);
+      else parts.push(formatErrorMessage(value, ""));
+    }
+    const readable = parts.filter(Boolean).join(" · ");
+    if (readable) return readable;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return fallback;
+    }
+  }
+  return String(error);
+}
+
 async function supabaseRequest(path, { method = "GET", body, prefer = "return=representation" } = {}) {
   if (!supabaseConfigured()) {
     throw new Error("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env before saving snapshots.");
@@ -169,7 +199,7 @@ async function supabaseRequest(path, { method = "GET", body, prefer = "return=re
   }
 
   if (!response.ok) {
-    const message = data?.message || data?.error || text || `Supabase returned HTTP ${response.status}.`;
+    const message = formatErrorMessage(data, text || `Supabase returned HTTP ${response.status}.`);
     throw new Error(message);
   }
 
@@ -355,6 +385,59 @@ function clipArray(value, maxItems) {
   return Array.isArray(value) ? value.slice(0, maxItems) : [];
 }
 
+const memwalAskAnswerSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    answer: { type: "string" },
+    confidence: { type: "string", enum: ["low", "medium", "high"] },
+    source_ids: { type: "array", items: { type: "string" } },
+    caution: { type: "string" },
+  },
+  required: ["answer", "confidence", "source_ids", "caution"],
+};
+
+function normalizeAskAnswer(answer, availableSourceIds) {
+  const validIds = new Set(availableSourceIds);
+  const sourceIds = Array.isArray(answer?.source_ids) ? answer.source_ids.filter((id) => validIds.has(id)) : [];
+  return {
+    answer: safeShortText(answer?.answer || "I could not produce a grounded answer from the current case memory.", 1200),
+    confidence: ["low", "medium", "high"].includes(answer?.confidence) ? answer.confidence : "low",
+    source_ids: sourceIds.length ? sourceIds.slice(0, 4) : ["current_case"].filter((id) => validIds.has(id)),
+    caution: safeShortText(answer?.caution || "This answer is based only on current case memory and recalled MemWal memories. Analyst labels are not confirmed entity attribution.", 500),
+  };
+}
+
+function validateAskAnswerSchema(answer) {
+  if (!answer || typeof answer !== "object" || Array.isArray(answer)) throw new Error("Ask answer must be an object.");
+  if (typeof answer.answer !== "string" || !answer.answer.trim()) throw new Error("Ask answer text is required.");
+  if (!["low", "medium", "high"].includes(answer.confidence)) throw new Error("Ask confidence is invalid.");
+  validateStringArray(answer.source_ids, "source_ids");
+  if (typeof answer.caution !== "string" || !answer.caution.trim()) throw new Error("Ask caution is required.");
+}
+
+function stripSafeAnalystLabelPhrases(text) {
+  return String(text || "")
+    .replace(/analyst[-\s]labeled\s+(?:hacker|attacker|criminal|thief|scammer)/gi, "analyst label")
+    .replace(/analyst[-\s]provided\s+(?:hacker|attacker|criminal|thief|scammer)\s+label/gi, "analyst label")
+    .replace(/(?:labeled|labelled)\s+as\s+(?:hacker|attacker|criminal|thief|scammer)/gi, "labeled as analyst label")
+    .replace(/has\s+(?:a\s+)?(?:hacker|attacker|criminal|thief|scammer)\s+label/gi, "has analyst label")
+    .replace(/label\s+is\s+(?:hacker|attacker|criminal|thief|scammer)/gi, "label is analyst label")
+    .replace(/(?:hacker|attacker|criminal|thief|scammer)\s+label/gi, "analyst label");
+}
+
+function validateAskAnswerSafety(answer) {
+  const text = stripSafeAnalystLabelPhrases([answer.answer, answer.caution].join("\n").toLowerCase());
+  const blockedPatterns = [
+    new RegExp("\\b(?:is|are|was|were)\\s+(?:the\\s+)?(?:hacker|attacker|criminal|thief|scammer)\\b"),
+    new RegExp("\\b(?:belongs to|owned by|controlled by|real[-\\s]?world identity)\\b"),
+    new RegExp("\\b(?:guilty|illegal|committed|criminal intent|legal conclusion)\\b"),
+  ];
+  if (blockedPatterns.some((pattern) => pattern.test(text))) {
+    throw new Error("Ask answer safety check failed. Try asking about analyst labels or current memory more specifically.");
+  }
+}
+
 function normalizeAiNotesForHandoff(notes) {
   return {
     ...notes,
@@ -370,9 +453,17 @@ function openAiUsesReasoningConfig(model) {
   return normalized.startsWith("gpt-5") || /^o\d/.test(normalized);
 }
 
+function openAiReasoningConfigFor(model, effort) {
+  if (!effort || !openAiUsesReasoningConfig(model)) return {};
+  return { reasoning: { effort } };
+}
+
 function openAiReasoningConfig() {
-  if (!openaiNotesReasoningEffort || !openAiUsesReasoningConfig(openaiNotesModel)) return {};
-  return { reasoning: { effort: openaiNotesReasoningEffort } };
+  return openAiReasoningConfigFor(openaiNotesModel, openaiNotesReasoningEffort);
+}
+
+function openAiAskReasoningConfig() {
+  return openAiReasoningConfigFor(openaiAskModel, openaiAskReasoningEffort);
 }
 
 function responseIncompleteReason(body) {
@@ -389,20 +480,28 @@ function responseOutputShape(body) {
   }));
 }
 
-function openAiResponseDebugInfo(body) {
+function openAiResponseDebugInfo(body, options = {}) {
   return {
     id: body?.id || "",
     status: body?.status || "",
     incompleteReason: responseIncompleteReason(body),
     outputShape: responseOutputShape(body),
-    model: openaiNotesModel,
-    maxOutputTokens: openaiNotesMaxOutputTokens,
-    reasoningEffort: openaiNotesReasoningEffort || "not_configured",
+    model: options.model || openaiNotesModel,
+    maxOutputTokens: options.maxOutputTokens || openaiNotesMaxOutputTokens,
+    reasoningEffort: options.reasoningEffort || openaiNotesReasoningEffort || "not_configured",
   };
 }
 
 function logOpenAiNotesDebug(message, body) {
   console.debug(`[CaseFlow] ${message}`, openAiResponseDebugInfo(body));
+}
+
+function logOpenAiAskDebug(message, body) {
+  console.debug(`[CaseFlow] ${message}`, openAiResponseDebugInfo(body, {
+    model: openaiAskModel,
+    maxOutputTokens: openaiAskMaxOutputTokens,
+    reasoningEffort: openaiAskReasoningEffort || "not_configured",
+  }));
 }
 
 function responseRefusalText(body) {
@@ -444,7 +543,7 @@ function aiNotesSystemPrompt() {
     "Use short addresses such as 0xabc...123def unless the exact full address is necessary for evidence.",
     "Avoid repeating the same flow or pattern across summary, observations, and hypotheses.",
     "Make next_steps concrete actions such as expand a specific node, inspect a specific flow, or verify a specific analyst-labeled entity.",
-    "You may reference analyst labels such as hacker, exchange_suspect, known_entity, intermediate, bridge, or watch.",
+    "You may reference analyst labels such as hacker, funder, exchange_suspect, known_entity, intermediate, bridge, or watch.",
     "Always phrase labels as analyst-provided or analyst-labeled, for example analyst-labeled hacker.",
     "If the seed or important nodes have analyst labels, mention the label context at least once.",
     "Do not treat analyst labels as confirmed on-chain facts.",
@@ -667,7 +766,7 @@ async function uploadWalrusQuilt(artifacts) {
   }
 
   if (!response.ok) {
-    throw new Error(body?.error || body?.message || text || `Walrus publisher returned HTTP ${response.status}.`);
+    throw new Error(formatErrorMessage(body?.error || body?.message || body, text || `Walrus publisher returned HTTP ${response.status}.`));
   }
 
   const quiltId = walrusQuiltId(body);
@@ -783,6 +882,11 @@ function isAllowedWalrusReadUrl(value) {
   }
 }
 
+function isWalrusBlobNotFoundError({ status, message, sourceUrl }) {
+  if (Number(status) !== 404 || !isAllowedWalrusReadUrl(sourceUrl)) return false;
+  return /BLOB_NOT_FOUND|blob[^\n]*not found|not found[^\n]*blob|quilt[^\n]*not found|not found[^\n]*quilt|requested blob ID does not exist/i.test(String(message || ""));
+}
+
 function walrusSnapshotReadUrlFromQuiltId(quiltId) {
   const id = String(quiltId || "").trim();
   if (!id || /^https?:\/\//i.test(id) || id.includes("/") || id.includes("?")) return "";
@@ -805,7 +909,12 @@ async function handleWalrusReadJson(req, res) {
   try {
     const response = await fetch(sourceUrl);
     const text = await response.text();
-    if (!response.ok) throw new Error(text || `Walrus aggregator returned HTTP ${response.status}.`);
+    if (!response.ok) {
+      if (isWalrusBlobNotFoundError({ status: response.status, message: text, sourceUrl })) {
+        throw new Error("This Walrus case may have expired or is no longer available on testnet.");
+      }
+      throw new Error("Unable to load this Walrus case right now. Please try again later.");
+    }
     let data;
     try {
       data = JSON.parse(text);
@@ -876,6 +985,8 @@ async function handleAuthVerify(req, res) {
 }
 
 function snapshotRecordFromPayload(payload, ownerAddress) {
+  const uploadedAt = new Date();
+  const expiresAt = new Date(uploadedAt.getTime() + walrusEpochs * walrusEpochDaysMs);
   return {
     wallet_address: ownerAddress,
     seed_address: String(payload.seedAddress || ""),
@@ -889,6 +1000,9 @@ function snapshotRecordFromPayload(payload, ownerAddress) {
     visible_flow_count: Number(payload.visibleFlowCount || 0),
     tx_count: Number(payload.txCount || 0),
     created_at_ms: Number(payload.createdAtMs || Date.now()),
+    uploaded_at: uploadedAt.toISOString(),
+    walrus_epochs: walrusEpochs,
+    walrus_expires_at: expiresAt.toISOString(),
   };
 }
 
@@ -938,6 +1052,10 @@ function memwalRememberText({ memwalMemory, quiltId, files }) {
   const boundaries = Array.isArray(memwalMemory?.trace_boundaries) ? memwalMemory.trace_boundaries.slice(0, 6) : [];
   const nextAction = memwalMemory?.next_best_action || null;
   const labels = Array.isArray(metadata.labels) ? metadata.labels.slice(0, 12).join(", ") : "";
+  const labeledNodes = normalizeLabeledNodes(metadata.labeled_nodes, 20);
+  const labeledNodeText = labeledNodes
+    .map((node) => `${node.address} (${node.labels.join(", ")} )`.replace(" )", ")"))
+    .join("; ");
   const boundaryText = boundaries
     .map((boundary) => `${boundary.address_short || boundary.address || "boundary"} (${boundary.boundary_type || "boundary"}): ${boundary.recommended_action || "verify_before_expanding"}`)
     .join("; ");
@@ -956,6 +1074,7 @@ function memwalRememberText({ memwalMemory, quiltId, files }) {
     "Structured hints:",
     `Root address: ${memwalMemory?.root_address || metadata.root_address || ""}`,
     labels ? `Labels: ${labels}` : "Labels: none recorded",
+    labeledNodeText ? `Labeled nodes: ${labeledNodeText}` : "Labeled nodes: none recorded",
     boundaryText ? `Trace boundaries: ${boundaryText}` : "Trace boundaries: none recorded",
     nextAction?.title ? `Next best action: ${nextAction.title}` : "Next best action: none recorded",
   ].filter((line) => line !== null && line !== undefined).join("\n");
@@ -1067,6 +1186,42 @@ function normalizeArray(value) {
   return Array.isArray(value) ? value.map((item) => String(item || "").trim()).filter(Boolean) : [];
 }
 
+function normalizeLabeledNodes(value, limit = 20) {
+  if (!Array.isArray(value)) return [];
+  return value.map((node) => {
+    const address = String(node?.address || node?.id || "").trim();
+    if (!address) return null;
+    return {
+      address,
+      address_short: safeShortText(node?.address_short || node?.shortAddress || shortTextId(address), 32),
+      labels: normalizeArray(node?.labels).slice(0, 8),
+    };
+  }).filter((node) => node && node.labels.length > 0).slice(0, limit);
+}
+
+function normalizeVisibleNodes(value, limit = 50) {
+  if (!Array.isArray(value)) return [];
+  return value.map((node) => {
+    const address = String(node?.address || node?.id || "").trim();
+    if (!address) return null;
+    return {
+      address,
+      address_short: safeShortText(node?.address_short || node?.shortAddress || shortTextId(address), 32),
+      labels: normalizeArray(node?.labels).slice(0, 8),
+    };
+  }).filter(Boolean).slice(0, limit);
+}
+
+function quiltIdFromWalrusUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    const match = url.pathname.match(/\/v1\/blobs\/by-quilt-id\/([^/]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  } catch {
+    return "";
+  }
+}
+
 function parseRestoreReferences(text) {
   const refs = { walrusCaseId: "", snapshotUrl: "", manifestUrl: "", reportUrl: "" };
   const lines = String(text || "").split(/\r?\n/);
@@ -1080,6 +1235,7 @@ function parseRestoreReferences(text) {
     if (key === "manifest url") refs.manifestUrl = value;
     if (key === "report url") refs.reportUrl = value;
   }
+  if (!refs.walrusCaseId) refs.walrusCaseId = quiltIdFromWalrusUrl(refs.snapshotUrl);
   return refs;
 }
 
@@ -1090,14 +1246,48 @@ function parseStructuredHint(text, label) {
 
 function extractMemorySummary(text) {
   const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const skip = /^(Sui CaseFlow MemWal Memory|Restore references:|Structured hints:|Walrus Case ID:|Walrus case id:|Snapshot URL:|Manifest URL:|Report URL:|Root address:|Labels:|Trace boundaries:|Next best action:)/i;
+  const skip = /^(Sui CaseFlow MemWal Memory|Restore references:|Structured hints:|Walrus Case ID:|Walrus case id:|Snapshot URL:|Manifest URL:|Report URL:|Root address:|Labels:|Labeled nodes:|Trace boundaries:|Next best action:)/i;
   return safeShortText(lines.find((line) => !skip.test(line)) || "Related Sui CaseFlow memory.", 240);
+}
+
+function labeledNodesFromText(text) {
+  const value = parseStructuredHint(text, "Labeled nodes");
+  if (!value || value.toLowerCase() === "none recorded") return [];
+  return value.split(/;+/).map((item) => {
+    const match = item.trim().match(/^(0x[a-fA-F0-9]{64})\s*\(([^)]*)\)/);
+    if (!match) return null;
+    return {
+      address: match[1],
+      address_short: shortTextId(match[1]),
+      labels: normalizeArray(match[2].split(/[,|]+/)),
+    };
+  }).filter((node) => node && node.labels.length > 0).slice(0, 20);
+}
+
+function traceBoundaryLabelNodesFromText(text) {
+  const value = parseStructuredHint(text, "Trace boundaries");
+  if (!value || value.toLowerCase() === "none recorded") return [];
+  return value.split(/;+/).map((item) => {
+    const match = item.trim().match(/^([^()]+?)\s*\(([^)]+)\)/);
+    if (!match) return null;
+    return {
+      address: "",
+      address_short: safeShortText(match[1].trim(), 32),
+      labels: normalizeArray([match[2]]),
+    };
+  }).filter((node) => node && node.address_short && node.labels.length > 0).slice(0, 12);
 }
 
 function tokenOverlap(left, right) {
   const a = new Set(normalizeArray(left));
   const b = new Set(normalizeArray(right));
   return Array.from(a).filter((item) => b.has(item));
+}
+
+const lowSignalRecallLabels = new Set(["seed", "swap", "protocol", "intermediate"]);
+
+function meaningfulRecallLabels(value) {
+  return normalizeArray(value).filter((label) => !lowSignalRecallLabels.has(label));
 }
 
 function recallDistanceScore(distance) {
@@ -1131,6 +1321,23 @@ function rankRecallMemory(memory, query) {
   const rootAddress = rootFromMemoryText(text);
   const labels = labelsFromText(text);
   const boundaryTypes = boundaryTypesFromText(text);
+  const labeledNodes = labeledNodesFromText(text);
+  const boundaryLabelNodes = traceBoundaryLabelNodesFromText(text);
+  const currentVisibleNodes = normalizeVisibleNodes(query.visibleNodes, 50);
+  const currentLabeledNodes = normalizeLabeledNodes(query.labeledNodes, 40);
+  const currentAddresses = new Set([
+    ...currentVisibleNodes,
+    ...currentLabeledNodes,
+  ].map((node) => node.address.toLowerCase()));
+  const currentShorts = new Map([...currentVisibleNodes, ...currentLabeledNodes]
+    .map((node) => [String(node.address_short || shortTextId(node.address)).toLowerCase(), node.address]));
+  const exactSameAddressLabels = labeledNodes
+    .filter((node) => currentAddresses.has(String(node.address || "").toLowerCase()));
+  const boundarySameAddressLabels = boundaryLabelNodes
+    .filter((node) => currentShorts.has(String(node.address_short || "").toLowerCase()))
+    .map((node) => ({ ...node, address: currentShorts.get(String(node.address_short || "").toLowerCase()) || "" }));
+  const sameAddressLabeledNodes = [...exactSameAddressLabels, ...boundarySameAddressLabels]
+    .slice(0, 8);
   const nextBestAction = parseStructuredHint(text, "Next best action");
   const currentWalrusCaseId = String(query.currentWalrusCaseId || "").trim();
   const isCurrentCase = Boolean(currentWalrusCaseId && refs.walrusCaseId && refs.walrusCaseId === currentWalrusCaseId);
@@ -1141,7 +1348,7 @@ function rankRecallMemory(memory, query) {
     score += 24;
     matchReasons.push("same root address");
   }
-  const sharedLabels = tokenOverlap(labels, query.labels);
+  const sharedLabels = tokenOverlap(meaningfulRecallLabels(labels), meaningfulRecallLabels(query.labels));
   if (sharedLabels.length) {
     score += Math.min(18, sharedLabels.length * 6);
     matchReasons.push(`shared label ${sharedLabels.slice(0, 2).join(", ")}`);
@@ -1151,15 +1358,14 @@ function rankRecallMemory(memory, query) {
     score += Math.min(20, sharedBoundaries.length * 8);
     matchReasons.push(`shared ${sharedBoundaries[0]} boundary`);
   }
+  if (sameAddressLabeledNodes.length) {
+    score += 22;
+    matchReasons.push(`same address has recalled label ${sameAddressLabeledNodes[0].labels[0]}`);
+  }
   if (query.nextActionType && nextBestAction.toLowerCase().includes(String(query.nextActionType).replace(/_/g, " ").toLowerCase())) {
     score += 10;
     matchReasons.push("similar next action");
   }
-  if (refs.walrusCaseId || refs.snapshotUrl) {
-    score += 12;
-    matchReasons.push("has Walrus restore reference");
-  }
-
   return {
     score,
     confidence: score >= 70 ? "High match" : "Medium match",
@@ -1169,8 +1375,12 @@ function rankRecallMemory(memory, query) {
     rootAddressShort: rootAddress ? shortTextId(rootAddress) : "",
     labels,
     boundaryTypes,
+    labeledNodes: labeledNodes.length ? labeledNodes : boundaryLabelNodes,
+    sameAddressLabeledNodes,
     nextBestAction: safeShortText(nextBestAction, 140),
     summary: extractMemorySummary(text),
+    referenceStatus: "unchecked",
+    referenceNotice: "",
     walrusCaseId: refs.walrusCaseId,
     walrusCaseIdShort: refs.walrusCaseId ? shortTextId(refs.walrusCaseId) : "",
     snapshotUrl: refs.snapshotUrl,
@@ -1181,17 +1391,72 @@ function rankRecallMemory(memory, query) {
   };
 }
 
+async function snapshotRecordsByQuiltIds(quiltIds, walletAddress) {
+  const ids = Array.from(new Set(normalizeArray(quiltIds))).filter(Boolean);
+  if (!ids.length || !supabaseConfigured()) return new Map();
+  const wallet = encodeURIComponent(`eq.${walletAddress}`);
+  const quotedIds = ids.map((id) => `"${String(id).replace(/"/g, '\"')}"`).join(",");
+  const rows = await supabaseRequest(`snapshot_records?wallet_address=${wallet}&quilt_id=in.(${encodeURIComponent(quotedIds)})&select=quilt_id,walrus_expires_at,snapshot_url,report_url`);
+  return new Map((rows || []).map((row) => [row.quilt_id, row]));
+}
+
+function withoutRestoreReferenceReason(memory) {
+  return {
+    ...memory,
+    matchReasons: (memory.matchReasons || []).filter((reason) => reason !== "has Walrus restore reference"),
+  };
+}
+
+function applyUnknownRecallReference(memory) {
+  return {
+    ...withoutRestoreReferenceReason(memory),
+    referenceStatus: "unknown",
+    referenceNotice: "Memory recalled, but no active Walrus restore reference was found.",
+    walrusCaseId: "",
+    walrusCaseIdShort: "",
+    snapshotUrl: "",
+  };
+}
+
+async function applyRecallReferenceStatus(memories, walletAddress) {
+  const recordMap = await snapshotRecordsByQuiltIds(memories.map((memory) => memory.walrusCaseId), walletAddress);
+  const now = Date.now();
+  return memories.map((memory) => {
+    if (!memory.walrusCaseId) {
+      return applyUnknownRecallReference(memory);
+    }
+    const record = recordMap.get(memory.walrusCaseId);
+    if (!record) {
+      return applyUnknownRecallReference(memory);
+    }
+    const expiresAtMs = record.walrus_expires_at ? Date.parse(record.walrus_expires_at) : NaN;
+    if (Number.isFinite(expiresAtMs) && expiresAtMs <= now) {
+      return { ...memory, referenceStatus: "expired" };
+    }
+    return {
+      ...memory,
+      referenceStatus: "active",
+      snapshotUrl: record.snapshot_url || memory.snapshotUrl,
+      reportUrl: record.report_url || memory.reportUrl,
+    };
+  });
+}
+
 function recallQueryText(payload) {
+  const labeledNodeText = normalizeLabeledNodes(payload.labeledNodes, 8)
+    .map((node) => `${node.address_short} (${node.labels.join(", ")} )`.replace(" )", ")"))
+    .join("; ");
   return [
     safeShortText(payload.searchText || "Sui CaseFlow investigation memory.", 1200),
     normalizeArray(payload.labels).length ? `Labels: ${normalizeArray(payload.labels).join(", ")}` : "",
+    labeledNodeText ? `Labeled nodes: ${labeledNodeText}` : "",
     normalizeArray(payload.boundaryTypes).length ? `Boundary types: ${normalizeArray(payload.boundaryTypes).join(", ")}` : "",
     normalizeArray(payload.patternTypes).length ? `Pattern types: ${normalizeArray(payload.patternTypes).join(", ")}` : "",
     payload.nextActionType ? `Next action type: ${payload.nextActionType}` : "",
   ].filter(Boolean).join("\n");
 }
 
-async function recallCasesInMemWal({ payload, walletAddress }) {
+async function recallCasesInMemWal({ payload, walletAddress, includeSameAddressLabelEvidence = false }) {
   const namespace = memwalNamespaceForWallet(walletAddress);
   const missing = memwalMissingConfig();
   if (missing.length > 0) {
@@ -1206,20 +1471,287 @@ async function recallCasesInMemWal({ payload, walletAddress }) {
     namespace,
   });
   const recalled = await client.recall(recallQueryText(payload), 10, namespace);
-  const ranked = (recalled?.results || [])
+  const candidates = (recalled?.results || [])
     .map((memory) => rankRecallMemory(memory, payload))
     .filter((memory) => !memory.isCurrentCase)
-    .filter((memory) => memory.score >= 40)
-    .filter((memory) => memory.walrusCaseId || memory.snapshotUrl)
-    .sort((a, b) => b.score - a.score || Number(a.distance ?? 999) - Number(b.distance ?? 999))
+    .filter((memory) => memory.score >= 40 || (includeSameAddressLabelEvidence && memory.sameAddressLabeledNodes.length > 0))
+    .sort((a, b) => b.score - a.score || Number(a.distance ?? 999) - Number(b.distance ?? 999));
+  const checked = await applyRecallReferenceStatus(candidates, walletAddress);
+  const activeOrUnknown = checked
+    .filter((memory) => memory.referenceStatus !== "expired")
     .slice(0, 3);
+  const expiredCount = checked.filter((memory) => memory.referenceStatus === "expired").length;
   return {
     status: "ok",
     namespace,
     total: recalled?.total || 0,
-    results: ranked,
-    message: ranked.length ? "Related memories found." : "No other related memories found yet.",
+    expiredCount,
+    results: activeOrUnknown,
+    message: activeOrUnknown.length
+      ? "Related memories found."
+      : expiredCount
+        ? "No active related memories found. Some recalled memories may point to expired Walrus testnet data."
+        : "No strong related memory found.",
   };
+}
+
+function memwalAskScopedRefusal(question) {
+  return {
+    ok: true,
+    status: "refused",
+    answer: {
+      answer: "I can only answer questions about the current Sui CaseFlow workspace and recalled MemWal investigation memories.",
+      confidence: "low",
+      caution: "Ask MemWal is scoped to current case memory and recalled case memories; it does not answer unrelated questions.",
+    },
+    sources: [{ id: "current_case", type: "current_case", label: "Current case memory" }],
+    sourceIds: ["current_case"],
+    recalled: [],
+  };
+}
+
+function isMemwalAskInScope(question) {
+  const value = String(question || "").trim().toLowerCase();
+  if (!value) return false;
+  const naturalInvestigation = /^(what|why|where|which|how|is this|should i|can i|do i|tell me|summarize|explain)\b/.test(value)
+    && /\b(this|case|one|next|important|look|check|verify|trace|stop|related|memory|flow|node|address|label|lead)\b/.test(value);
+  const scopedKeywords = /\b(case|address|wallet|memory|memwal|flow|fund|trace|label|boundary|next|verify|recall|walrus|snapshot|report|node|transaction|tx|sui|usdc|exchange|bridge|hacker|intermediate|known_entity|exchange_suspect|lead|expand|restore)\b/.test(value);
+  const zhScopedKeywords = /案件|地址|錢包|記憶|資金|流向|金流|追蹤|標籤|邊界|下一步|驗證|召回|相關|快照|報告|節點|交易|交易所|橋|駭客|中繼|展開|復原|重要|看看|為什麼|哪裡/.test(value);
+  return naturalInvestigation || scopedKeywords || zhScopedKeywords;
+}
+
+function safeAskCurrentMemory(payload) {
+  return {
+    searchText: safeShortText(payload.searchText || "", 2200),
+    rootAddress: safeShortText(payload.rootAddress || "", 90),
+    labels: normalizeArray(payload.labels).slice(0, 12),
+    boundaryTypes: normalizeArray(payload.boundaryTypes).slice(0, 12),
+    patternTypes: normalizeArray(payload.patternTypes).slice(0, 12),
+    nextActionType: safeShortText(payload.nextActionType || "", 80),
+    nextBestAction: payload.nextBestAction && typeof payload.nextBestAction === "object" ? {
+      type: safeShortText(payload.nextBestAction.type || payload.nextBestAction.action_type || "", 80),
+      title: safeShortText(payload.nextBestAction.title || "", 180),
+      rationale: safeShortText(payload.nextBestAction.rationale || "", 260),
+    } : null,
+    traceBoundaries: Array.isArray(payload.traceBoundaries) ? payload.traceBoundaries.slice(0, 4).map((boundary) => ({
+      address_short: safeShortText(boundary?.address_short || "", 32),
+      boundary_type: safeShortText(boundary?.boundary_type || "", 80),
+      recommended_action: safeShortText(boundary?.recommended_action || "", 100),
+    })) : [],
+    visibleNodes: normalizeVisibleNodes(payload.visibleNodes, 50),
+    labeledNodes: normalizeLabeledNodes(payload.labeledNodes, 20),
+  };
+}
+
+function safeAskMemorySummary(memory, index) {
+  return {
+    source_id: "memory_" + (index + 1),
+    summary: safeShortText(memory.summary || "Related memory.", 500),
+    rootAddressShort: safeShortText(memory.rootAddressShort || "", 32),
+    confidence: memory.confidence || "Medium match",
+    matchReasons: (memory.matchReasons || []).slice(0, 4),
+    labels: (memory.labels || []).slice(0, 8),
+    boundaryTypes: (memory.boundaryTypes || []).slice(0, 8),
+    labeledNodes: normalizeLabeledNodes(memory.labeledNodes, 12),
+    sameAddressLabeledNodes: normalizeLabeledNodes(memory.sameAddressLabeledNodes, 8),
+    nextBestAction: safeShortText(memory.nextBestAction || "", 180),
+    walrusCaseIdShort: safeShortText(memory.referenceStatus === "active" ? memory.walrusCaseIdShort || "" : "", 32),
+    referenceStatus: memory.referenceStatus || "unknown",
+    referenceNotice: safeShortText(memory.referenceNotice || "", 180),
+  };
+}
+
+function askAvailableSources(recalled) {
+  const sources = [{ id: "current_case", type: "current_case", label: "Current case memory" }];
+  if (!recalled.length) {
+    sources.push({ id: "no_recalled_memory", type: "no_recalled_memory", label: "No related MemWal memory found" });
+    return sources;
+  }
+  for (const [index, memory] of recalled.entries()) {
+    sources.push({
+      id: "memory_" + (index + 1),
+      type: "recalled_memory",
+      label: memory.referenceStatus === "active" && memory.walrusCaseIdShort ? "Walrus ID: " + memory.walrusCaseIdShort : "Related memory " + (index + 1),
+      walrusCaseId: memory.referenceStatus === "active" ? memory.walrusCaseId || "" : "",
+      snapshotUrl: memory.referenceStatus === "active" ? memory.snapshotUrl || "" : "",
+    });
+  }
+  return sources;
+}
+
+function memwalAskSystemPrompt() {
+  return [
+    "You are Ask MemWal inside Sui CaseFlow, a bounded investigation memory assistant.",
+    "Answer only from current_case_memory and recalled_memories. Do not query the blockchain, read Walrus, use outside knowledge, or invent addresses, labels, transaction digests, Walrus IDs, entities, or evidence.",
+    "",
+    "current_case_memory is the currently visible workspace. recalled_memories are past MemWal memories from saved cases. If recalled_memories is empty, say no related MemWal memory directly matched and answer only from current_case_memory.",
+    "",
+    "For label or memory questions, treat memory as recalled_memories first. Prioritize same-address matches between current_case_memory.visibleNodes and recalled_memories.labeledNodes / sameAddressLabeledNodes. Clearly distinguish current-case labels, recalled-memory labels, and same-address recalled labels; never describe a recalled label as a confirmed current-case label unless current_case_memory.labeledNodes contains it.",
+    "",
+    "For trace-boundary or stop questions, if a current visible address appears in recalled memory with analyst-provided exchange_suspect, known_entity, known_exchange, bridge, or bridge_contract labels, treat it as memory-backed boundary evidence and prefer verify/stop wording over expand wording.",
+    "",
+    "Analyst labels, including hacker, funder, exchange_suspect, known_entity, intermediate, bridge, and watch, are analyst-provided context, not confirmed attribution. Do not infer real-world identity, ownership, criminal intent, illegality, guilt, or legal conclusions.",
+    "",
+    "Keep the answer concise but useful: usually 3 to 6 sentences in up to 2 short paragraphs. For verification, boundary, or comparison questions, use the second paragraph for the key evidence. Do not turn the answer into a full report or list every node. Do not use fixed headings. Do not write a Caution sentence inside answer; use the separate caution field. Use only source_ids from available_sources and include current_case when current case memory supports the answer.",
+  ].join("\n");
+}
+
+async function generateOpenAiAskAnswer({ question, currentMemory, recalledMemories, availableSources }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), openaiAskTimeoutMs);
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        authorization: "Bearer " + openaiApiKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: openaiAskModel,
+        max_output_tokens: openaiAskMaxOutputTokens,
+        ...openAiAskReasoningConfig(),
+        input: [
+          { role: "system", content: memwalAskSystemPrompt() },
+          {
+            role: "user",
+            content: JSON.stringify({
+              question,
+              current_case_memory: currentMemory,
+              recalled_memories: recalledMemories,
+              available_sources: availableSources.map((source) => ({
+                source_id: source.id,
+                type: source.type,
+                label: source.label,
+              })),
+            }),
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "memwal_ask_answer",
+            strict: true,
+            schema: memwalAskAnswerSchema,
+          },
+        },
+      }),
+    });
+    const text = await response.text();
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { raw: text };
+    }
+    if (!response.ok) {
+      throw new Error(body?.error?.message || body?.error || text || "OpenAI returned HTTP " + response.status + ".");
+    }
+    if (body?.status === "incomplete") {
+      logOpenAiAskDebug("OpenAI ask response incomplete", body);
+      throw new Error("Ask generation incomplete: " + (responseIncompleteReason(body) || "unknown") + ".");
+    }
+    const refusal = responseRefusalText(body);
+    if (refusal) {
+      logOpenAiAskDebug("OpenAI ask response refused", body);
+      throw new Error("OpenAI refused to answer: " + refusal);
+    }
+    const outputText = responseOutputText(body);
+    if (!outputText) {
+      logOpenAiAskDebug("OpenAI ask response missing output text", body);
+      throw new Error("OpenAI response did not include output text for Ask MemWal.");
+    }
+    let answer;
+    try {
+      answer = JSON.parse(outputText);
+    } catch {
+      throw new Error("OpenAI Ask response was not valid JSON.");
+    }
+    answer = normalizeAskAnswer(answer, availableSources.map((source) => source.id));
+    validateAskAnswerSchema(answer);
+    validateAskAnswerSafety(answer);
+    return answer;
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("Ask MemWal timed out.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function askMemWal({ payload, walletAddress }) {
+  const question = String(payload.question || "").trim();
+  if (!question) throw new Error("Question is required.");
+  if (question.length > maxMemWalAskQuestionChars) throw new Error("Question is too long. Maximum is " + maxMemWalAskQuestionChars + " characters.");
+  if (!payload?.searchText || typeof payload.searchText !== "string") throw new Error("Current case memory is required before Ask MemWal.");
+
+  const currentMemory = safeAskCurrentMemory(payload);
+  const availableCurrentSource = [{ id: "current_case", type: "current_case", label: "Current case memory" }];
+  if (!isMemwalAskInScope(question)) return memwalAskScopedRefusal(question);
+  if (!openaiApiKey) {
+    return {
+      ok: true,
+      status: "skipped",
+      answer: {
+        answer: "OpenAI is not configured for Ask MemWal on this server.",
+        confidence: "low",
+        caution: "Ask MemWal requires an OpenAI provider; no chat content was saved.",
+      },
+      sources: availableCurrentSource,
+      sourceIds: ["current_case"],
+      recalled: [],
+    };
+  }
+
+  const recalledResult = await recallCasesInMemWal({
+    payload,
+    walletAddress,
+    includeSameAddressLabelEvidence: true,
+  });
+  const recalled = recalledResult.results || [];
+  const availableSources = askAvailableSources(recalled);
+  const recalledSummaries = recalled.map((memory, index) => safeAskMemorySummary(memory, index));
+  const answer = await generateOpenAiAskAnswer({
+    question,
+    currentMemory,
+    recalledMemories: recalledSummaries,
+    availableSources,
+  });
+  const sourceMap = new Map(availableSources.map((source) => [source.id, source]));
+  return {
+    ok: true,
+    status: recalledResult.status || "ok",
+    answer: {
+      answer: answer.answer,
+      confidence: answer.confidence,
+      caution: answer.caution,
+    },
+    sourceIds: answer.source_ids,
+    sources: answer.source_ids.map((id) => sourceMap.get(id)).filter(Boolean),
+    recalled,
+    message: recalled.length ? "Answered from current case memory and recalled MemWal memories." : "Answered from current case memory. No related MemWal memory was found.",
+  };
+}
+
+async function handleMemWalAsk(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Use POST to ask MemWal." });
+    return;
+  }
+  let session;
+  try {
+    session = requireSession(req);
+  } catch {
+    sendJson(res, 401, { error: "Connect Wallet to ask MemWal." });
+    return;
+  }
+  try {
+    const payload = await readRequestJson(req, maxMemWalAskBytes);
+    const result = await askMemWal({ payload, walletAddress: session.address });
+    sendJson(res, 200, result);
+  } catch (error) {
+    sendJson(res, 502, { error: error.message || "Ask MemWal failed." });
+  }
 }
 
 async function handleMemWalRecall(req, res) {
@@ -1420,8 +1952,13 @@ async function handleSnapshots(req, res) {
 
   try {
     if (req.method === "GET") {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const includeExpired = url.searchParams.get("include_expired") === "1";
       const wallet = encodeURIComponent(`eq.${session.address}`);
-      const rows = await supabaseRequest(`snapshot_records?wallet_address=${wallet}&select=*&order=uploaded_at.desc&limit=25`);
+      const expiryFilter = includeExpired
+        ? ""
+        : `&or=${encodeURIComponent(`(walrus_expires_at.is.null,walrus_expires_at.gt.${new Date().toISOString()})`)}`;
+      const rows = await supabaseRequest(`snapshot_records?wallet_address=${wallet}&select=*&order=uploaded_at.desc&limit=25${expiryFilter}`);
       sendJson(res, 200, { snapshots: rows || [] });
       return;
     }
@@ -1494,6 +2031,11 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/ai-notes")) {
     await handleAiNotes(req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/memwal/ask")) {
+    await handleMemWalAsk(req, res);
     return;
   }
 

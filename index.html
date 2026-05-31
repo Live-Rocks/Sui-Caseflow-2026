@@ -136,29 +136,26 @@
           <span id="memwalAssistantIcon" aria-hidden="true">▴</span>
         </button>
         <div id="memwalAssistantBody" class="memwal-assistant-body" hidden>
-          <div class="memwal-assistant-section">
-            <p class="eyebrow">Current Case Memory</p>
-            <p id="memwalCurrentSummary" class="memwal-assistant-copy">Start a trace or restore a snapshot to recall related memories.</p>
-            <dl class="memwal-current-meta">
-              <div>
-                <dt>Root</dt>
-                <dd id="memwalCurrentRoot">No case</dd>
-              </div>
-              <div>
-                <dt>Status</dt>
-                <dd id="memwalCurrentStatus">No memory card</dd>
-              </div>
-              <div>
-                <dt>Next action</dt>
-                <dd id="memwalCurrentNext">None</dd>
-              </div>
-            </dl>
-          </div>
-          <div class="memwal-assistant-actions">
-            <button id="memwalRecallButton" class="primary-button" type="button">Recall Related Cases</button>
+          <div class="memwal-assistant-section memwal-context-bar">
+            <p id="memwalCurrentSummary" class="memwal-context-main">No active case. Start a trace or restore a snapshot.</p>
+            <p id="memwalCurrentNext" class="memwal-context-next">Next: none</p>
           </div>
           <p id="memwalRecallStatus" class="memwal-recall-status"></p>
-          <div id="memwalRecallResults" class="memwal-recall-results"></div>
+          <div class="memwal-assistant-section memwal-ask-section">
+            <p class="eyebrow">Ask MemWal</p>
+            <p class="memwal-assistant-copy">Ask a grounded question about the current case and recalled MemWal memories. Chat is not saved.</p>
+            <div class="memwal-ask-prompts" aria-label="Suggested Ask MemWal prompts">
+              <button type="button" data-memwal-prompt="What is the strongest related memory?" data-memwal-mode="recall">Strongest memory</button>
+              <button type="button" data-memwal-prompt="Any current case address has an analyst label in MemWal memory?">Known labels</button>
+              <button type="button" data-memwal-prompt="Where should tracing stop?">Trace boundary</button>
+            </div>
+            <div id="memwalChatTimeline" class="memwal-chat-timeline" aria-live="polite"></div>
+            <form id="memwalAskForm" class="memwal-ask-form">
+              <textarea id="memwalAskInput" rows="2" maxlength="1000" placeholder="Ask about this case or recalled memories"></textarea>
+              <button id="memwalAskButton" class="primary-button" type="submit">Ask</button>
+            </form>
+            <p id="memwalAskStatus" class="memwal-recall-status"></p>
+          </div>
         </div>
       </section>
     </div>

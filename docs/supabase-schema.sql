@@ -12,11 +12,30 @@ create table if not exists public.snapshot_records (
   visible_flow_count integer not null default 0,
   tx_count integer not null default 0,
   created_at_ms bigint not null,
-  uploaded_at timestamptz not null default now()
+  uploaded_at timestamptz not null default now(),
+  walrus_epochs integer,
+  walrus_expires_at timestamptz
 );
 
 create index if not exists snapshot_records_wallet_uploaded_idx
   on public.snapshot_records (wallet_address, uploaded_at desc);
+
+-- Estimated Walrus expiry metadata. Existing projects can run these ALTERs safely.
+alter table public.snapshot_records add column if not exists walrus_epochs integer;
+alter table public.snapshot_records add column if not exists walrus_expires_at timestamptz;
+
+-- Backfill historical records. Old uploads used the project default of 5 Walrus epochs.
+update public.snapshot_records
+set walrus_epochs = 5
+where walrus_epochs is null;
+
+update public.snapshot_records
+set walrus_expires_at = case
+  when uploaded_at is not null then uploaded_at + (walrus_epochs * interval '1 day')
+  when created_at_ms is not null and created_at_ms > 0 then to_timestamp(created_at_ms / 1000.0) + (walrus_epochs * interval '1 day')
+  else now() - interval '1 day'
+end
+where walrus_expires_at is null;
 
 -- Optional MemWal remember metadata. Existing projects can run these ALTERs safely.
 alter table public.snapshot_records add column if not exists memwal_status text not null default 'skipped';

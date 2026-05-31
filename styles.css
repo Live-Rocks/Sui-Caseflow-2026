@@ -944,7 +944,7 @@ a.digest-text:hover {
 
 .memwal-assistant-body {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   max-height: min(520px, calc(100vh - 160px));
   padding: 14px;
   overflow-y: auto;
@@ -964,32 +964,25 @@ a.digest-text:hover {
   line-height: 1.35;
 }
 
-.memwal-current-meta {
+.memwal-context-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin: 10px 0 0;
+  gap: 4px;
 }
 
-.memwal-current-meta div {
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px;
-  background: rgba(245, 243, 238, 0.52);
-}
-
-.memwal-current-meta dt {
+.memwal-context-main,
+.memwal-context-next {
+  margin: 0;
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
-.memwal-current-meta dd {
-  margin: 2px 0 0;
-  font-size: 13px;
+.memwal-context-main {
+  color: var(--ink);
   font-weight: 800;
+}
+
+.memwal-context-next {
   overflow-wrap: anywhere;
 }
 
@@ -1012,6 +1005,10 @@ a.digest-text:hover {
 .memwal-recall-status.error {
   color: var(--red);
   font-weight: 800;
+}
+
+.memwal-recall-status:empty {
+  display: none;
 }
 
 .memwal-recall-results {
@@ -1073,6 +1070,174 @@ a.digest-text:hover {
   text-decoration: none;
 }
 
+.memwal-ask-section {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.memwal-ask-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.memwal-ask-prompts button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgba(245, 243, 238, 0.76);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.memwal-ask-prompts button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.memwal-chat-timeline {
+  display: grid;
+  gap: 10px;
+  max-height: 260px;
+  margin: 8px 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.memwal-chat-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.memwal-chat-row {
+  display: flex;
+}
+
+.memwal-chat-row.is-user {
+  justify-content: flex-end;
+}
+
+.memwal-chat-row.is-assistant {
+  justify-content: flex-start;
+}
+
+.memwal-chat-bubble {
+  max-width: 92%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.memwal-chat-bubble p {
+  margin: 0;
+}
+
+.memwal-chat-bubble p + p,
+.memwal-chat-bubble .memwal-source-chips,
+.memwal-chat-bubble .memwal-result-actions {
+  margin-top: 8px;
+}
+
+.memwal-chat-bubble.is-user {
+  border-color: rgba(20, 108, 148, 0.34);
+  background: rgba(20, 108, 148, 0.1);
+  color: var(--ink);
+  font-weight: 750;
+}
+
+.memwal-chat-bubble.is-assistant {
+  background: rgba(255, 253, 244, 0.78);
+}
+
+.memwal-chat-bubble.is-error {
+  border-color: rgba(178, 58, 72, 0.28);
+  background: rgba(178, 58, 72, 0.08);
+  color: var(--red);
+  font-weight: 800;
+}
+
+.memwal-ask-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.memwal-ask-form textarea {
+  min-height: 42px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.memwal-ask-form .primary-button {
+  min-height: 42px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.memwal-ask-answer {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 253, 244, 0.78);
+}
+
+.memwal-ask-answer[hidden] {
+  display: none;
+}
+
+.memwal-ask-answer p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.memwal-ask-answer-text {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.memwal-ask-answer-paragraphs {
+  display: grid;
+  gap: 8px;
+}
+
+.memwal-ask-meta,
+.memwal-ask-caution {
+  color: var(--muted);
+}
+
+.memwal-source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memwal-source-chip {
+  border: 1px solid var(--green);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 850;
+}
+
 @media (max-width: 1180px) {
   .app-header,
   .main-grid {
@@ -1099,9 +1264,6 @@ a.digest-text:hover {
     width: calc(100vw - 20px);
   }
 
-  .memwal-current-meta {
-    grid-template-columns: 1fr;
-  }
 
   body {
     height: auto;
