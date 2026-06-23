@@ -6,7 +6,12 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5174",
     "server": "PORT=5174 node server.mjs",
+    "build": "vite build",
+    "start": "node server.mjs",
     "check": "node --check app.js && node --check server.mjs && node --check src/mint-snapshot.js && node --check src/wallet-auth.js"
+  },
+  "engines": {
+    "node": ">=20.19.0"
   },
   "dependencies": {
     "@mysten-incubation/memwal": "^0.0.3",

@@ -34,6 +34,40 @@ Development ports:
 - API server: `http://127.0.0.1:5173`
 - Vite frontend: `http://127.0.0.1:5174`
 
+## Production build test
+
+To test the production deployment path locally, build the Vite frontend and run the Node server in production mode:
+
+```bash
+npm run build
+NODE_ENV=production PORT=5199 npm start
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5199
+```
+
+In production mode, `server.mjs` serves only the Vite `dist` directory and fails fast if `dist/index.html` is missing. The sample trace fixture is available from `public/data/sample-trace.json`, which Vite copies to `dist/data/sample-trace.json` during build.
+
+## Zeabur deployment
+
+The app is deployment-ready as a long-lived Node service. Recommended Zeabur settings:
+
+```text
+Build command: npm install && npm run build
+Start command: npm start
+```
+
+Set this environment variable for the service:
+
+```bash
+NODE_ENV=production
+```
+
+Add server-side secrets in Zeabur environment variables, not in GitHub or `.env` files. `VITE_*` variables are public build-time values and must be present before `npm run build`; server-only secrets such as `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, and `MEMWAL_DELEGATE_PRIVATE_KEY` must not use the `VITE_` prefix.
+
 ### Snapshot NFT dev mode
 
 Wallet-based testnet minting is available through the Vite frontend while the API server runs on port 5173.

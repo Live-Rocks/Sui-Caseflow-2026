@@ -3,12 +3,19 @@
 import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
+const isProduction = process.env.NODE_ENV === "production";
+const distRoot = join(root, "dist");
+const staticRoot = isProduction ? distRoot : root;
+
+if (isProduction && !existsSync(join(distRoot, "index.html"))) {
+  throw new Error("Production build missing: dist/index.html not found. Run npm run build before npm start.");
+}
 
 function loadLocalEnv() {
   try {
@@ -946,6 +953,10 @@ async function verifyWalletSignature({ address, message, signature }) {
   await verifyPersonalMessageSignature(new TextEncoder().encode(message), signature, { address });
 }
 
+function isZkLoginVerifySchemaMismatch(error) {
+  return /Unknown field "error" on type "ZkLoginVerifyResult"/i.test(String(error?.message || error || ""));
+}
+
 async function handleAuthVerify(req, res) {
   if (req.method !== "POST") {
     sendJson(res, 405, { error: "Use POST to verify wallet sign-in." });
@@ -980,6 +991,10 @@ async function handleAuthVerify(req, res) {
     const token = createSessionToken({ address: address.toLowerCase(), issuedAt: Date.now(), expiresAt });
     sendJson(res, 200, { token, address: address.toLowerCase(), expiresAt });
   } catch (error) {
+    if (isZkLoginVerifySchemaMismatch(error)) {
+      sendJson(res, 401, { error: "This zkLogin wallet signature could not be verified by the current Sui SDK. Try another Sui wallet account for now." });
+      return;
+    }
     sendJson(res, 401, { error: error.message || "Wallet signature verification failed." });
   }
 }
@@ -1980,9 +1995,9 @@ async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
   const normalized = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
-  const filePath = join(root, normalized);
+  const filePath = join(staticRoot, normalized);
 
-  if (!filePath.startsWith(root)) {
+  if (!filePath.startsWith(staticRoot)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -1999,6 +2014,11 @@ async function serveStatic(req, res) {
 }
 
 const server = createServer(async (req, res) => {
+  if (req.url === "/healthz") {
+    sendJson(res, 200, { ok: true, service: "sui-caseflow" });
+    return;
+  }
+
   if (req.url?.startsWith("/api/trace")) {
     await handleApiTrace(req, res);
     return;
@@ -2057,6 +2077,6 @@ const server = createServer(async (req, res) => {
   await serveStatic(req, res);
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Sui CaseFlow running at http://127.0.0.1:${port}`);
+server.listen(port, "0.0.0.0", () => {
+  console.log(`Sui CaseFlow running at http://0.0.0.0:${port}`);
 });

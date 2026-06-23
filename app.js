@@ -25,6 +25,11 @@ let walletDropdownOpen = false;
 let memwalAssistantOpen = false;
 let memwalChatMessages = [];
 let memwalChatMessageId = 0;
+let walletAuthModule = null;
+let walletChoices = [];
+let selectedWalletChoice = null;
+let selectedWalletAccounts = [];
+let selectedWalletAccountIndex = -1;
 let currentWalrusCaseId = "";
 let currentSnapshotUrl = "";
 let currentSnapshotHash = "";
@@ -47,6 +52,7 @@ const els = {
   walletMenu: document.querySelector("#walletMenu"),
   walletButton: document.querySelector("#walletButton"),
   walletDropdown: document.querySelector("#walletDropdown"),
+  walletPicker: document.querySelector("#walletPicker"),
   signOutButton: document.querySelector("#signOutButton"),
   authStatus: document.querySelector("#authStatus"),
   reputationPanel: document.querySelector("#reputationPanel"),
@@ -171,6 +177,7 @@ function renderAuthState() {
     els.walletButton.textContent = shortAddress(authSession.address);
     els.walletButton.title = authSession.address;
     els.signOutButton.hidden = false;
+    if (els.walletPicker) els.walletPicker.hidden = true;
     setAuthStatus("Signed in. Walrus uploads and XP are saved to your profile.", "success");
   } else {
     els.walletButton.textContent = "Connect Wallet";
@@ -181,6 +188,198 @@ function renderAuthState() {
   }
   renderReputation();
   renderSnapshotList();
+}
+
+async function loadWalletAuthModule() {
+  if (!walletAuthModule) walletAuthModule = await import("./src/wallet-auth.js");
+  return walletAuthModule;
+}
+
+function walletChainLabel(chains = []) {
+  if (chains.includes("sui:mainnet") && chains.includes("sui:testnet")) return "mainnet/testnet";
+  if (chains.includes("sui:mainnet")) return "mainnet";
+  if (chains.includes("sui:testnet")) return "testnet";
+  return "Sui";
+}
+
+function renderWalletPickerWallets() {
+  if (!els.walletPicker) return;
+  els.walletPicker.hidden = false;
+  els.walletPicker.innerHTML = "";
+
+  const title = document.createElement("p");
+  title.className = "wallet-picker-title";
+  title.textContent = "Choose wallet";
+  els.walletPicker.append(title);
+
+  if (!walletChoices.length) {
+    const empty = document.createElement("p");
+    empty.className = "wallet-picker-note";
+    empty.textContent = "No Sui wallet with message signing was found.";
+    els.walletPicker.append(empty);
+    return;
+  }
+
+  for (const [index, choice] of walletChoices.entries()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wallet-choice-button";
+    button.dataset.walletIndex = String(index);
+    const name = document.createElement("strong");
+    name.textContent = choice.summary.name;
+    const chain = document.createElement("span");
+    chain.textContent = walletChainLabel(choice.summary.chains);
+    button.append(name, chain);
+    els.walletPicker.append(button);
+  }
+
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "wallet-picker-link";
+  refresh.dataset.walletRefresh = "1";
+  refresh.textContent = "Refresh wallets";
+  els.walletPicker.append(refresh);
+}
+
+function renderWalletPickerAccounts() {
+  if (!els.walletPicker) return;
+  els.walletPicker.hidden = false;
+  els.walletPicker.innerHTML = "";
+
+  const title = document.createElement("p");
+  title.className = "wallet-picker-title";
+  title.textContent = selectedWalletChoice?.summary?.name ? `Choose account · ${selectedWalletChoice.summary.name}` : "Choose account";
+  els.walletPicker.append(title);
+
+  if (!selectedWalletAccounts.length) {
+    const empty = document.createElement("p");
+    empty.className = "wallet-picker-note";
+    empty.textContent = "This wallet did not return a Sui account for signing.";
+    els.walletPicker.append(empty);
+  }
+
+  for (const [index, account] of selectedWalletAccounts.entries()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `wallet-choice-button ${index === selectedWalletAccountIndex ? "is-selected" : ""}`.trim();
+    button.dataset.accountIndex = String(index);
+    const address = document.createElement("strong");
+    address.textContent = shortAddress(account.address);
+    const chain = document.createElement("span");
+    chain.textContent = walletChainLabel(account.chains);
+    button.append(address, chain);
+    els.walletPicker.append(button);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "wallet-picker-actions";
+
+  const chooseAnother = document.createElement("button");
+  chooseAnother.type = "button";
+  chooseAnother.className = "wallet-picker-link";
+  chooseAnother.dataset.walletChooseAnother = "1";
+  chooseAnother.textContent = "Choose another account";
+
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "wallet-picker-link";
+  refresh.dataset.walletRefresh = "1";
+  refresh.textContent = "Refresh wallets";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "wallet-picker-link";
+  cancel.dataset.walletCancel = "1";
+  cancel.textContent = "Cancel";
+
+  actions.append(chooseAnother, refresh, cancel);
+  els.walletPicker.append(actions);
+}
+
+async function refreshWalletChoices(message = "Choose a wallet to sign in.") {
+  setWalletDropdownOpen(true);
+  setAuthStatus("Checking installed Sui wallets...");
+  const auth = await loadWalletAuthModule();
+  walletChoices = auth.getSuiWalletChoices();
+  selectedWalletChoice = null;
+  selectedWalletAccounts = [];
+  selectedWalletAccountIndex = -1;
+  renderWalletPickerWallets();
+  setAuthStatus(walletChoices.length ? message : "No Sui wallet found. Install or unlock a Sui wallet, then refresh this page.", walletChoices.length ? "" : "error");
+}
+
+async function chooseWalletForSignIn(index) {
+  selectedWalletChoice = walletChoices[index] || null;
+  selectedWalletAccounts = [];
+  selectedWalletAccountIndex = -1;
+  if (!selectedWalletChoice) {
+    setAuthStatus("Selected wallet is no longer available.", "error");
+    renderWalletPickerWallets();
+    return;
+  }
+
+  setAuthStatus(`Opening ${selectedWalletChoice.summary.name}...`);
+  const auth = await loadWalletAuthModule();
+  const connected = await auth.connectSuiWallet(selectedWalletChoice.wallet);
+  selectedWalletAccounts = connected.rawAccounts || [];
+  if (selectedWalletAccounts.length === 1) {
+    selectedWalletAccountIndex = 0;
+    await signInWithWallet(0);
+    return;
+  }
+  renderWalletPickerAccounts();
+  setAuthStatus(selectedWalletAccounts.length ? "Choose an account to sign in." : "Connected wallet has no Sui account available for signing.", selectedWalletAccounts.length ? "" : "error");
+}
+
+function chooseWalletAccount(index) {
+  selectedWalletAccountIndex = selectedWalletAccounts[index] ? index : -1;
+  if (selectedWalletAccountIndex >= 0) {
+    void signInWithWallet(selectedWalletAccountIndex);
+    return;
+  }
+  renderWalletPickerAccounts();
+  setAuthStatus("Choose an account to sign in.", "error");
+}
+
+async function disconnectSelectedWallet() {
+  if (!selectedWalletChoice?.wallet) return false;
+  const auth = await loadWalletAuthModule();
+  return auth.disconnectSuiWallet(selectedWalletChoice.wallet);
+}
+
+async function chooseAnotherWalletAccount() {
+  try {
+    const disconnected = await disconnectSelectedWallet();
+    selectedWalletChoice = null;
+    selectedWalletAccounts = [];
+    selectedWalletAccountIndex = -1;
+    await refreshWalletChoices(disconnected
+      ? "Wallet disconnected. Choose a wallet or account again."
+      : "If the wallet keeps the same account, disconnect this site in the wallet extension, then refresh wallets.");
+  } catch (error) {
+    selectedWalletChoice = null;
+    selectedWalletAccounts = [];
+    selectedWalletAccountIndex = -1;
+    renderWalletPickerWallets();
+    setAuthStatus(error.message || "Could not reset wallet connection.", "error");
+  }
+}
+
+function shouldDisconnectAfterSignInError(error) {
+  const message = String(error?.message || error || "");
+  return !/reject|denied|cancel/i.test(message);
+}
+
+function cancelWalletPicker() {
+  selectedWalletChoice = null;
+  selectedWalletAccounts = [];
+  selectedWalletAccountIndex = -1;
+  if (els.walletPicker) {
+    els.walletPicker.innerHTML = "";
+    els.walletPicker.hidden = true;
+  }
+  setAuthStatus("Connect wallet to save Walrus snapshots and Analyst XP.");
+  closeWalletDropdown();
 }
 
 function fallbackReputationProfile() {
@@ -1028,21 +1227,35 @@ async function loadMySnapshots() {
   }
 }
 
-async function signInWithWallet() {
+async function signInWithWallet(accountIndex = -1) {
   if (authSession?.address) {
     setWalletDropdownOpen(true);
     return;
   }
+  if (accountIndex < 0) {
+    await refreshWalletChoices();
+    return;
+  }
+  const account = selectedWalletAccounts[accountIndex];
+  if (!selectedWalletChoice?.wallet || !account) {
+    setAuthStatus("Choose a wallet account before signing in.", "error");
+    renderWalletPickerAccounts();
+    return;
+  }
 
   els.walletButton.disabled = true;
-  setAuthStatus("Opening wallet for sign-in...");
+  setAuthStatus("Opening wallet signature request...");
   try {
     const nonceResponse = await fetch("/api/auth/nonce", { method: "POST" });
     const nonceResult = await nonceResponse.json().catch(() => ({}));
     if (!nonceResponse.ok) throw new Error(nonceResult.error || "Could not start wallet sign-in.");
 
-    const { signInWithSuiWallet } = await import("./src/wallet-auth.js");
-    const signed = await signInWithSuiWallet({ message: nonceResult.message });
+    const auth = await loadWalletAuthModule();
+    const signed = await auth.signInWithSuiWallet({
+      message: nonceResult.message,
+      wallet: selectedWalletChoice.wallet,
+      account,
+    });
 
     const verifyResponse = await fetch("/api/auth/verify", {
       method: "POST",
@@ -1063,6 +1276,23 @@ async function signInWithWallet() {
   } catch (error) {
     setAuthStatus(error.message, "error");
     setWalletDropdownOpen(true);
+    let disconnected = false;
+    if (shouldDisconnectAfterSignInError(error)) {
+      try {
+        disconnected = await disconnectSelectedWallet();
+      } catch {
+        // Some wallets do not support programmatic disconnect; keep the picker visible.
+      }
+    }
+    if (disconnected) {
+      selectedWalletChoice = null;
+      selectedWalletAccounts = [];
+      selectedWalletAccountIndex = -1;
+      renderWalletPickerWallets();
+      setAuthStatus(`${error.message} Choose another wallet or account.`, "error");
+    } else {
+      renderWalletPickerAccounts();
+    }
   } finally {
     els.walletButton.disabled = false;
   }
@@ -1070,13 +1300,16 @@ async function signInWithWallet() {
 
 function signOutWallet() {
   clearAuthSession();
+  selectedWalletChoice = null;
+  selectedWalletAccounts = [];
+  selectedWalletAccountIndex = -1;
   closeWalletDropdown();
 }
 
 function toggleWalletMenu(event) {
   event.stopPropagation();
   if (!authSession?.address) {
-    signInWithWallet();
+    void signInWithWallet();
     return;
   }
   setWalletDropdownOpen(!walletDropdownOpen);
@@ -4206,6 +4439,29 @@ function handleKeyboardShortcut(event) {
 
 els.walletButton.addEventListener("click", toggleWalletMenu);
 els.signOutButton.addEventListener("click", signOutWallet);
+els.walletPicker.addEventListener("click", (event) => {
+  const walletButton = event.target.closest("[data-wallet-index]");
+  const accountButton = event.target.closest("[data-account-index]");
+  if (walletButton) {
+    void chooseWalletForSignIn(Number(walletButton.dataset.walletIndex));
+    return;
+  }
+  if (accountButton) {
+    chooseWalletAccount(Number(accountButton.dataset.accountIndex));
+    return;
+  }
+  if (event.target.closest("[data-wallet-refresh]")) {
+    void refreshWalletChoices();
+    return;
+  }
+  if (event.target.closest("[data-wallet-choose-another]")) {
+    void chooseAnotherWalletAccount();
+    return;
+  }
+  if (event.target.closest("[data-wallet-cancel]")) {
+    cancelWalletPicker();
+  }
+});
 els.memwalAssistantToggle.addEventListener("click", () => setMemwalAssistantOpen(!memwalAssistantOpen));
 els.memwalAskForm.addEventListener("submit", (event) => {
   event.preventDefault();

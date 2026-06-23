@@ -74,6 +74,16 @@ npm run dev
 
 The old single-server command `PORT=5174 node server.mjs` is no longer the preferred dev path because wallet imports and Vite module resolution need the Vite frontend.
 
+Production / deployment path:
+
+- First public deployment target is Zeabur or another long-lived Node service, not a Vercel serverless refactor.
+- `server.mjs` serves `/api/*` before static files, listens on `process.env.PORT` and `0.0.0.0`, and exposes `GET /healthz`.
+- In `NODE_ENV=production`, `server.mjs` serves only `dist` and fails fast when `dist/index.html` is missing. It must not fallback to the repo root in production.
+- `package.json` has `build` / `start` scripts for `vite build` and `node server.mjs`.
+- Node is pinned to `>=20.19.0` with `.nvmrc` set to `20.19.0`; `.npmrc` uses `legacy-peer-deps=true` for clean installs with the MemWal / Sui dependency set.
+- `data/sample-trace.json` remains for local fallback, while `public/data/sample-trace.json` is the production sample asset copied by Vite into `dist/data/sample-trace.json`.
+- `VITE_*` values are build-time public frontend env vars. Supabase service role, OpenAI key, and MemWal delegate private key are server-only env vars and must not use a `VITE_` prefix.
+
 ## Product Preferences
 
 Important product decisions so far:
