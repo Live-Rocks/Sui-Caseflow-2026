@@ -1788,9 +1788,9 @@ async function expandSelectedNode() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Expand failed");
 
-    mergeTrace(payload);
+    const mergeResult = mergeTrace(payload, { parentId: address });
     invalidateCaseMemoryRefs();
-    applyExpansionLineage(address, payload);
+    applyExpansionLineage(address, payload, mergeResult);
     expandedNodeIds.add(address);
     selectedNodeId = address;
     selectedFlowKey = null;
@@ -1811,9 +1811,30 @@ async function expandSelectedNode() {
   }
 }
 
-function mergeTrace(nextTrace) {
+function expansionDirectionForParent(parentId, graph) {
+  if (!parentId || !graph || parentId === graph.seedAddress || parentId.startsWith("protocol:")) return 0;
+  const depth = nodeDepthById.get(parentId);
+  if (!Number.isFinite(depth) || depth === 0) return 0;
+  return Math.sign(depth);
+}
+
+function edgeMatchesExpansionDirection(edge, parentId, direction) {
+  if (!parentId || !direction) return true;
+  if (direction > 0) return edge.from === parentId;
+  if (direction < 0) return edge.to === parentId;
+  return true;
+}
+
+function filterExpansionEdges(edges, parentId, direction) {
+  return (edges || []).filter((edge) => edgeMatchesExpansionDirection(edge, parentId, direction));
+}
+
+function mergeTrace(nextTrace, options = {}) {
   const graph = trace.graphSnapshot;
   const nextGraph = nextTrace.graphSnapshot;
+  const parentId = options.parentId || "";
+  const expansionDirection = expansionDirectionForParent(parentId, graph);
+  const visibleExpansionEdges = filterExpansionEdges(nextGraph.edges || [], parentId, expansionDirection);
   const existingNodeIds = new Set(graph.nodes.map((node) => node.id));
   const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
   const edgeMap = new Map();
@@ -1824,8 +1845,19 @@ function mergeTrace(nextTrace) {
     mergeEdgeIntoMap(edgeMap, edge);
   }
 
+  const visibleBackfillEdges = inferBackfillEdges(nextTrace, existingNodeIds, {
+    parentId,
+    direction: expansionDirection,
+  });
+  const visibleNextNodeIds = new Set([nextTrace.seedAddress]);
+  for (const edge of [...visibleExpansionEdges, ...visibleBackfillEdges]) {
+    visibleNextNodeIds.add(edge.from);
+    visibleNextNodeIds.add(edge.to);
+  }
+
   for (const node of nextGraph.nodes) {
     const existing = nodeMap.get(node.id);
+    if (!existing && !visibleNextNodeIds.has(node.id)) continue;
     const incomingLabels = normalizeNodeLabels(node.id, node.labels || []);
     if (existing) {
       existing.labels = normalizeNodeLabels(node.id, [...(existing.labels || []), ...incomingLabels]);
@@ -1842,11 +1874,11 @@ function mergeTrace(nextTrace) {
     }
   }
 
-  for (const edge of nextGraph.edges) {
+  for (const edge of visibleExpansionEdges) {
     mergeEdgeIntoMap(edgeMap, edge);
   }
 
-  for (const edge of inferBackfillEdges(nextTrace, existingNodeIds)) {
+  for (const edge of visibleBackfillEdges) {
     mergeEdgeIntoMap(edgeMap, edge);
   }
 
@@ -1874,10 +1906,17 @@ function mergeTrace(nextTrace) {
         .sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0)),
     },
   };
+
+  return {
+    expansionDirection,
+    visibleExpansionEdges: [...visibleExpansionEdges, ...visibleBackfillEdges],
+  };
 }
 
-function inferBackfillEdges(nextTrace, existingNodeIds) {
+function inferBackfillEdges(nextTrace, existingNodeIds, options = {}) {
   const addedAddress = nextTrace.seedAddress;
+  const parentId = options.parentId || addedAddress;
+  const direction = options.direction || 0;
   const edges = [];
   const seen = new Set();
 
@@ -1894,6 +1933,7 @@ function inferBackfillEdges(nextTrace, existingNodeIds) {
       : inferSameTransactionLinks({ tx, addedAddress, existingChanges });
 
     for (const edge of candidateEdges) {
+      if (!edgeMatchesExpansionDirection(edge, parentId, direction)) continue;
       const key = edgeMergeKey(edge);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -2058,19 +2098,20 @@ function lineageDirection(nodeId, graph) {
   return 1;
 }
 
-function applyExpansionLineage(parentId, nextTrace) {
+function applyExpansionLineage(parentId, nextTrace, mergeResult = {}) {
   if (!trace?.graphSnapshot || parentId.startsWith("protocol:")) return;
   const graph = trace.graphSnapshot;
   const parentDepth = nodeDepthById.get(parentId) ?? lineageDirection(parentId, graph);
-  const direction = parentDepth < 0 ? -1 : 1;
+  const direction = mergeResult.expansionDirection || (parentDepth < 0 ? -1 : 1);
 
   nodeDepthById.set(parentId, parentDepth);
 
-  const nextNodeIds = new Set((nextTrace.graphSnapshot?.nodes || []).map((node) => node.id));
+  const knownNodeIds = new Set((graph.nodes || []).map((node) => node.id));
+  const edgesForLineage = mergeResult.visibleExpansionEdges || nextTrace.graphSnapshot?.edges || [];
   const adjacency = new Map();
 
-  for (const edge of nextTrace.graphSnapshot?.edges || []) {
-    if (!nextNodeIds.has(edge.from) || !nextNodeIds.has(edge.to)) continue;
+  for (const edge of edgesForLineage) {
+    if (!knownNodeIds.has(edge.from) || !knownNodeIds.has(edge.to)) continue;
     if (!adjacency.has(edge.from)) adjacency.set(edge.from, new Set());
     if (!adjacency.has(edge.to)) adjacency.set(edge.to, new Set());
     adjacency.get(edge.from).add(edge.to);
