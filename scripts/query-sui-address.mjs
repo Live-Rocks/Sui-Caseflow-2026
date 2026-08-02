@@ -486,11 +486,11 @@ function buildGraphSnapshot(address, network, transactions, metadataByCoinType) 
 }
 
 const TRANSACTIONS_QUERY = `
-  query CaseFlowTransactions($address: SuiAddress!, $first: Int!, $after: String) {
-    transactions(filter: { affectedAddress: $address }, first: $first, after: $after) {
+  query CaseFlowTransactions($address: SuiAddress!, $last: Int!, $before: String) {
+    transactions(filter: { affectedAddress: $address }, last: $last, before: $before) {
       pageInfo {
-        hasNextPage
-        endCursor
+        hasPreviousPage
+        startCursor
       }
       nodes {
         digest
@@ -561,8 +561,8 @@ const COIN_METADATA_QUERY = `
 async function queryAddressByFilter({ address, limit, network }) {
   const data = [];
   let cursor = null;
-  let hasNextPage = false;
-  let nextCursor = null;
+  let hasMoreHistory = false;
+  let historyCursor = null;
   let pageCount = 0;
 
   do {
@@ -572,24 +572,24 @@ async function queryAddressByFilter({ address, limit, network }) {
     const pageLimit = Math.min(MAX_TRANSACTION_PAGE_SIZE, remaining);
     const dataPage = await graphql(network, TRANSACTIONS_QUERY, {
       address,
-      first: pageLimit,
-      after: cursor,
+      last: pageLimit,
+      before: cursor,
     });
     const page = dataPage?.transactions || {};
 
     pageCount += 1;
     data.push(...(page.nodes || []).map(normalizeGraphQLTransaction));
-    hasNextPage = Boolean(page.pageInfo?.hasNextPage);
-    nextCursor = page.pageInfo?.endCursor || null;
-    cursor = nextCursor;
+    hasMoreHistory = Boolean(page.pageInfo?.hasPreviousPage);
+    historyCursor = page.pageInfo?.startCursor || null;
+    cursor = historyCursor;
 
-    if (!hasNextPage || !nextCursor || (page.nodes || []).length === 0) break;
+    if (!hasMoreHistory || !historyCursor || (page.nodes || []).length === 0) break;
   } while (data.length < limit);
 
   return {
     data,
-    nextCursor,
-    hasNextPage,
+    nextCursor: historyCursor,
+    hasNextPage: hasMoreHistory,
     pageCount,
     requestedCount: limit,
   };
