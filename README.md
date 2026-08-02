@@ -11,7 +11,7 @@ Input any Sui address, fetch recent transaction blocks, parse balance changes, a
 - `docs/mvp-spec.md` - product scope, demo flow, and feature boundaries.
 - `docs/graph-model.md` - graph data structures for addresses, flows, labels, and timeline items.
 - `docs/project-memory.md` - product context, current capabilities, architecture notes, and future direction.
-- `scripts/query-sui-address.mjs` - dependency-free Sui RPC proof-of-concept.
+- `scripts/query-sui-address.mjs` - dependency-free Sui GraphQL RPC trace adapter.
 
 ## Quick Start
 
@@ -85,7 +85,8 @@ Run the proof-of-concept with a Sui address:
 node scripts/query-sui-address.mjs 0xYOUR_SUI_ADDRESS
 ```
 
-The script queries both outbound and inbound transaction blocks, merges them by digest, and emits a graph-shaped JSON summary.
+The script queries transaction blocks that affected the target address and emits a graph-shaped JSON summary.
+The current adapter uses Sui GraphQL RPC because JSON-RPC public fullnodes have been deprecated. By default it uses public Sui GraphQL endpoints; for heavier production traffic, set the `SUI_GRAPHQL_*_URL` environment variables to provider endpoints.
 
 Optional arguments:
 
@@ -104,6 +105,14 @@ Supported networks:
 - `mainnet`
 - `testnet`
 - `devnet`
+
+Optional Sui GraphQL endpoint overrides:
+
+```bash
+SUI_GRAPHQL_MAINNET_URL="https://graphql.mainnet.sui.io/graphql"
+SUI_GRAPHQL_TESTNET_URL="https://graphql.testnet.sui.io/graphql"
+SUI_GRAPHQL_DEVNET_URL="https://graphql.devnet.sui.io/graphql"
+```
 
 ## Wallet sign-in and My Snapshots
 

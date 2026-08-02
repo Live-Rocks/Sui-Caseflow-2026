@@ -27,7 +27,7 @@ Sui CaseFlow is not a block explorer replacement. Explorers expose raw facts; Su
 ### Included
 
 - Arbitrary Sui address input.
-- Recent transaction lookup through `suix_queryTransactionBlocks`.
+- Recent transaction lookup through Sui GraphQL RPC `transactions(filter: { affectedAddress })`.
 - Balance-change parsing.
 - Initial flow graph JSON.
 - Address labels and notes in local state.
@@ -75,6 +75,6 @@ An investigator is tracking funds after an incident. The attacker sends assets t
 ## Success Criteria
 
 - A judge can paste a Sui address and see real transaction data.
-- The tool produces a graph-shaped JSON output from live RPC data.
+- The tool produces a graph-shaped JSON output from live GraphQL RPC data.
 - The demo explains uncertainty honestly with `probable` and `possible` labels.
 - The case workflow feels useful even before entity intelligence is complete.

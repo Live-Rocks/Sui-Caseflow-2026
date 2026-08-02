@@ -22,7 +22,7 @@ The app currently supports:
 
 - Arbitrary Sui address trace through the local API server.
 - Transaction limits of Last 25, Last 50, and Last 100.
-- Multi-page Sui RPC fetching so Last 100 can reach beyond the first RPC page.
+- Multi-page Sui GraphQL RPC fetching so Last 100 can reach beyond the first GraphQL page.
 - Visual fund-flow graph with draggable nodes, pan, zoom, fit, and undo.
 - Expand node workflow with dedupe and lineage-aware layout.
 - Dust / noise filter for same-transaction clutter and tiny SUI flows; current SUI threshold is `< 0.02 SUI`, while non-SUI token amounts are not dust-filtered by value.
@@ -52,13 +52,14 @@ Current stack:
 
 - Frontend: vanilla JavaScript, HTML, CSS, served by Vite in dev.
 - API server: Node `server.mjs`.
-- Data source: Sui RPC through the local API server.
+- Data source: Sui GraphQL RPC through the local API server. JSON-RPC public fullnodes are deprecated and should not be used for trace / expand.
 - Explorer links: Suivision.
 - Persistent snapshot storage: Walrus public publisher / aggregator.
 - Snapshot index: Supabase `snapshot_records` table.
 - Hackathon/testnet demo retention currently recommends `WALRUS_EPOCHS=31`; each upload stores its own `walrus_epochs` and estimated `walrus_expires_at`.
 - Optional recall index: MemWal remember v1, managed by the app through a delegate private key and separated by deterministic wallet namespace hashes.
 - Identity: Sui wallet signature session, stored locally as a short-lived token.
+- Sui GraphQL endpoint defaults use public Sui endpoints (`https://graphql.<network>.sui.io/graphql`). For higher traffic or reliability, replace them with provider URLs via `SUI_GRAPHQL_MAINNET_URL`, `SUI_GRAPHQL_TESTNET_URL`, and `SUI_GRAPHQL_DEVNET_URL`.
 
 Development ports:
 

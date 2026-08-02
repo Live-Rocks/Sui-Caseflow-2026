@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-const RPC_URLS = {
-  mainnet: "https://fullnode.mainnet.sui.io:443",
-  testnet: "https://fullnode.testnet.sui.io:443",
-  devnet: "https://fullnode.devnet.sui.io:443",
+const GRAPHQL_URLS = {
+  mainnet: process.env.SUI_GRAPHQL_MAINNET_URL || "https://graphql.mainnet.sui.io/graphql",
+  testnet: process.env.SUI_GRAPHQL_TESTNET_URL || "https://graphql.testnet.sui.io/graphql",
+  devnet: process.env.SUI_GRAPHQL_DEVNET_URL || "https://graphql.devnet.sui.io/graphql",
 };
 const MAX_TRANSACTION_PAGE_SIZE = 50;
 const MAX_INFERRED_EDGES_PER_COIN = 25;
@@ -64,35 +64,44 @@ function assertValidArgs(args) {
     process.exit(1);
   }
 
-  if (!RPC_URLS[args.network]) {
+  if (!GRAPHQL_URLS[args.network]) {
     console.error(`Unsupported network: ${args.network}`);
-    console.error(`Use one of: ${Object.keys(RPC_URLS).join(", ")}`);
+    console.error(`Use one of: ${Object.keys(GRAPHQL_URLS).join(", ")}`);
     process.exit(1);
   }
 }
 
-async function rpc(network, method, params) {
-  const response = await fetch(RPC_URLS[network], {
+function formatGraphQLErrors(errors = []) {
+  return errors
+    .map((error) => {
+      const path = Array.isArray(error.path) ? ` at ${error.path.join(".")}` : "";
+      return `${error.message || "Unknown GraphQL error"}${path}`;
+    })
+    .join("; ");
+}
+
+async function graphql(network, query, variables = {}) {
+  const response = await fetch(GRAPHQL_URLS[network], {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method,
-      params,
-    }),
+    body: JSON.stringify({ query, variables }),
   });
 
   if (!response.ok) {
-    throw new Error(`RPC HTTP ${response.status}: ${await response.text()}`);
+    const body = await response.text();
+    const rateLimited = response.status === 429 || /rate limit|too many requests/i.test(body);
+    const prefix = rateLimited
+      ? "Sui GraphQL endpoint rate limited or unavailable"
+      : `Sui GraphQL HTTP ${response.status}`;
+    throw new Error(`${prefix}: ${body}`);
   }
 
   const payload = await response.json();
-  if (payload.error) {
-    throw new Error(`RPC error: ${JSON.stringify(payload.error)}`);
+  if (payload.errors?.length) {
+    throw new Error(`Sui GraphQL error: ${formatGraphQLErrors(payload.errors)}`);
   }
 
-  return payload.result;
+  return payload.data;
 }
 
 function ownerToAddress(owner) {
@@ -108,6 +117,61 @@ function ownerToAddress(owner) {
 function formatAmount(rawAmount) {
   const value = BigInt(rawAmount);
   return value.toString();
+}
+
+function normalizeSuiAddressText(value) {
+  if (typeof value !== "string" || !value.startsWith("0x")) return value;
+  const trimmed = value.slice(2).replace(/^0+/, "") || "0";
+  return `0x${trimmed}`;
+}
+
+function normalizeMoveType(value) {
+  if (typeof value !== "string") return value;
+  const [address, ...rest] = value.split("::");
+  if (!address || rest.length === 0) return value;
+  return [normalizeSuiAddressText(address), ...rest].join("::");
+}
+
+function dateTimeToTimestampMs(value) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? String(timestamp) : null;
+}
+
+function normalizeExecutionStatus(status) {
+  if (!status) return "unknown";
+  return String(status).toLowerCase();
+}
+
+function normalizeGraphQLTransaction(tx) {
+  const effects = tx.effects || {};
+
+  return {
+    digest: tx.digest,
+    timestampMs: dateTimeToTimestampMs(effects.timestamp),
+    effects: {
+      status: {
+        status: normalizeExecutionStatus(effects.status),
+      },
+    },
+    balanceChanges: (effects.balanceChanges?.nodes || []).map((change) => ({
+      owner: change.owner?.address || null,
+      coinType: normalizeMoveType(change.coinType?.repr || SUI_COIN_TYPE),
+      amount: change.amount || "0",
+    })),
+    events: (effects.events?.nodes || []).map((event) => ({
+      type: normalizeMoveType(event.contents?.type?.repr || ""),
+      transactionModule: event.transactionModule?.name || "",
+    })),
+    objectChanges: (effects.objectChanges?.nodes || []).map((change) => ({
+      objectId: change.address,
+      type: normalizeMoveType(
+        change.outputState?.asMoveObject?.contents?.type?.repr
+          || change.inputState?.asMoveObject?.contents?.type?.repr
+          || null,
+      ),
+    })),
+  };
 }
 
 function fallbackCoinMetadata(coinType) {
@@ -421,7 +485,80 @@ function buildGraphSnapshot(address, network, transactions, metadataByCoinType) 
   };
 }
 
-async function queryAddressByFilter({ filter, limit, network }) {
+const TRANSACTIONS_QUERY = `
+  query CaseFlowTransactions($address: SuiAddress!, $first: Int!, $after: String) {
+    transactions(filter: { affectedAddress: $address }, first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        digest
+        effects {
+          status
+          timestamp
+          balanceChanges(first: 50) {
+            nodes {
+              owner {
+                address
+              }
+              coinType {
+                repr
+              }
+              amount
+            }
+          }
+          events(first: 50) {
+            nodes {
+              contents {
+                type {
+                  repr
+                }
+              }
+              transactionModule {
+                name
+              }
+            }
+          }
+          objectChanges(first: 50) {
+            nodes {
+              address
+              inputState {
+                asMoveObject {
+                  contents {
+                    type {
+                      repr
+                    }
+                  }
+                }
+              }
+              outputState {
+                asMoveObject {
+                  contents {
+                    type {
+                      repr
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const COIN_METADATA_QUERY = `
+  query CaseFlowCoinMetadata($coinType: String!) {
+    coinMetadata(coinType: $coinType) {
+      symbol
+      decimals
+    }
+  }
+`;
+
+async function queryAddressByFilter({ address, limit, network }) {
   const data = [];
   let cursor = null;
   let hasNextPage = false;
@@ -433,29 +570,20 @@ async function queryAddressByFilter({ filter, limit, network }) {
     if (remaining <= 0) break;
 
     const pageLimit = Math.min(MAX_TRANSACTION_PAGE_SIZE, remaining);
-    const page = await rpc(network, "suix_queryTransactionBlocks", [
-      {
-        filter,
-        options: {
-          showBalanceChanges: true,
-          showEffects: true,
-          showEvents: true,
-          showObjectChanges: true,
-          showInput: true,
-        },
-      },
-      cursor,
-      pageLimit,
-      true,
-    ]);
+    const dataPage = await graphql(network, TRANSACTIONS_QUERY, {
+      address,
+      first: pageLimit,
+      after: cursor,
+    });
+    const page = dataPage?.transactions || {};
 
     pageCount += 1;
-    data.push(...(page.data || []));
-    hasNextPage = Boolean(page.hasNextPage);
-    nextCursor = page.nextCursor || null;
+    data.push(...(page.nodes || []).map(normalizeGraphQLTransaction));
+    hasNextPage = Boolean(page.pageInfo?.hasNextPage);
+    nextCursor = page.pageInfo?.endCursor || null;
     cursor = nextCursor;
 
-    if (!hasNextPage || !nextCursor || (page.data || []).length === 0) break;
+    if (!hasNextPage || !nextCursor || (page.nodes || []).length === 0) break;
   } while (data.length < limit);
 
   return {
@@ -469,7 +597,8 @@ async function queryAddressByFilter({ filter, limit, network }) {
 
 async function fetchCoinMetadata(network, coinType) {
   try {
-    const metadata = await rpc(network, "suix_getCoinMetadata", [coinType]);
+    const result = await graphql(network, COIN_METADATA_QUERY, { coinType });
+    const metadata = result?.coinMetadata;
     const fallback = fallbackCoinMetadata(coinType);
     return {
       coinType,
@@ -525,24 +654,13 @@ function mergeTransactionPages(pages, limit) {
 }
 
 async function queryAddress({ address, limit, network }) {
-  const [fromPage, toPage] = await Promise.all([
-    queryAddressByFilter({
-      filter: {
-        FromAddress: address,
-      },
-      limit,
-      network,
-    }),
-    queryAddressByFilter({
-      filter: {
-        ToAddress: address,
-      },
-      limit,
-      network,
-    }),
-  ]);
+  const page = await queryAddressByFilter({
+    address,
+    limit,
+    network,
+  });
 
-  return mergeTransactionPages([fromPage, toPage], limit);
+  return mergeTransactionPages([page], limit);
 }
 
 async function buildSummary(address, network, result) {
