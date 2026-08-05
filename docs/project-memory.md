@@ -167,6 +167,8 @@ Current `.env` settings:
 - `MEMWAL_SERVER_URL`
 - `MEMWAL_NAMESPACE_PREFIX=sui-caseflow`
 
+Walrus Memory migration note: MemWal was renamed to Walrus Memory. The production relayer URL is `https://relayer.memory.walrus.xyz`; staging uses `https://relayer-staging.memory.walrus.xyz`. Account id, delegate private key, and relayer URL must belong to the same Walrus Memory environment. If MemWal Assistant shows `MemWal server error (401): <no message>`, first check the Walrus Memory dashboard for an active account and a valid saved delegate key. In August 2026, this project saw that exact 401 after the old delegate key was no longer available in the browser/dashboard; creating a new delegate key and updating `MEMWAL_DELEGATE_PRIVATE_KEY` in local `.env` and Zeabur restored both local and deployed MemWal Assistant behavior. Do not commit delegate keys.
+
 MemWal Assistant v1 is implemented in the right-bottom drawer as a chat timeline. `Strongest memory` uses recall-only flow: the current workspace is query material, the backend recalls up to 10 MemWal memories, reranks locally, excludes the current case, and returns the top 3 relevant previous memories. `Ask MemWal` is bounded Q&A: it recalls memories, sends compact current/recalled summaries to OpenAI, and renders a structured JSON answer with source chips, confidence, and caution. The frontend renders Ask answers as readable paragraphs and uses decimal-safe splitting so amounts such as `50.00K` are not broken across paragraphs.
 
 Ask MemWal has three guardrail layers:
