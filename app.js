@@ -2171,9 +2171,7 @@ function renderHistoryHint() {
   }
 
   const limit = Number(els.limitSelect.value);
-  if (limit < 50) {
-    els.historyHint.textContent = "More history exists. Switch to Last 50 or 100 to include older activity.";
-  } else if (limit < 100) {
+  if (limit < 100) {
     els.historyHint.textContent = "More history exists. Switch to Last 100 to include older activity.";
   } else {
     els.historyHint.textContent = "More history exists beyond the current 100 transaction window.";
