@@ -19,9 +19,10 @@
 
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 1280px;
   height: 100vh;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   overscroll-behavior: none;
   background: var(--bg);
   color: var(--ink);
@@ -47,6 +48,7 @@ button:disabled {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
+  min-width: 1280px;
   min-height: 0;
   overflow: hidden;
 }
@@ -1309,71 +1311,10 @@ a.digest-text:hover {
   font-weight: 850;
 }
 
-@media (max-width: 1180px) {
-  .app-header,
-  .main-grid {
-    grid-template-columns: 280px minmax(420px, 1fr);
-  }
-
-  .timeline {
-    grid-column: 1 / -1;
-    border-left: 0;
-    border-top: 1px solid var(--line);
-    max-height: none;
-    overflow-y: visible;
-  }
-
-  .flow-panel {
-    max-height: 520px;
-  }
-}
-
 @media (max-width: 760px) {
   .memwal-assistant {
     right: 10px;
     bottom: 10px;
     width: calc(100vw - 20px);
-  }
-
-
-  body {
-    height: auto;
-    overflow: auto;
-  }
-
-  .app-shell,
-  .main-grid {
-    display: block;
-    height: auto;
-    overflow: visible;
-  }
-
-  .app-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-
-  .wallet-menu {
-    grid-column: auto;
-    justify-self: auto;
-  }
-
-  .sidebar,
-  .timeline {
-    border: 0;
-    overflow-y: visible;
-  }
-
-  .toolbar {
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .graph-surface,
-  #flowGraph {
-    min-height: 460px;
   }
 }
